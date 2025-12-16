@@ -763,6 +763,11 @@ class NewFileCreationDialog(tk.Toplevel):
 
         self._create_widgets(current_folder_name)
         self.protocol("WM_DELETE_WINDOW", self.cancel)
+        
+        # Bind Enter and Escape keys
+        self.bind('<Return>', lambda e: self.ok())
+        self.bind('<Escape>', lambda e: self.cancel())
+        
         self.wait_window(self)
 
     def _create_widgets(self, folder_name):
@@ -925,11 +930,19 @@ class TimelineEditor(ttk.Frame):
         """Create the timeline interface."""
         
         # Configuration Section
-        config_frame = ttk.LabelFrame(self, text="Time Configuration", padding="10")
-        config_frame.pack(fill=tk.X, padx=5, pady=5)
+        config_header_frame = ttk.Frame(self)
+        config_header_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.config_collapsed = tk.BooleanVar(value=True)  # Start collapsed
+        self.config_toggle_btn = ttk.Button(config_header_frame, text="▶ Time Configuration", 
+                                           command=self._toggle_config_panel)
+        self.config_toggle_btn.pack(side=tk.LEFT)
+        
+        self.config_frame = ttk.Frame(self, padding="10")
+        # Don't pack initially - will be packed/unpacked by toggle
         
         # Time unit configuration
-        units_frame = ttk.Frame(config_frame)
+        units_frame = ttk.Frame(self.config_frame)
         units_frame.pack(fill=tk.X)
         
         # Force specific display order
@@ -943,7 +956,9 @@ class TimelineEditor(ttk.Frame):
                 visible_var = tk.BooleanVar(value=self.config_data.get("visible_units", {}).get(unit, True))
                 setattr(self, f"{unit}_visible_var", visible_var)
                 visible_var.trace_add('write', lambda *args, u=unit: self._toggle_unit_visibility(u))
-                ttk.Checkbutton(units_frame, variable=visible_var).grid(row=i, column=0, padx=5)
+                checkbox = ttk.Checkbutton(units_frame, variable=visible_var)
+                checkbox.grid(row=i, column=0, padx=5)
+                setattr(self, f"{unit}_checkbox", checkbox)  # Store reference
                 
                 ttk.Label(units_frame, text=f"{unit.replace('_', ' ').title()}:").grid(row=i, column=1, sticky="w", padx=5)
                 
@@ -958,11 +973,18 @@ class TimelineEditor(ttk.Frame):
                 if unit in ["days_of_week", "days_of_month"]:
                     btn = ttk.Button(units_frame, text=f"Name {unit.replace('_', ' ').title()}", 
                                    command=lambda u=unit: self._configure_day_names(u))
-                else:
+                    btn.grid(row=i, column=3, padx=5)
+                    setattr(self, f"{unit}_name_btn", btn)
+                elif unit == "ages":
+                    btn = ttk.Button(units_frame, text="Configure Ages", 
+                                   command=lambda u=unit: self._configure_ages())
+                    btn.grid(row=i, column=3, padx=5)
+                    setattr(self, f"{unit}_name_btn", btn)
+                elif unit != "years":  # Skip creating button for years
                     btn = ttk.Button(units_frame, text=f"Name {unit.replace('_', ' ').title()}", 
                                    command=lambda u=unit: self._configure_names(u))
-                btn.grid(row=i, column=3, padx=5)
-                setattr(self, f"{unit}_name_btn", btn)
+                    btn.grid(row=i, column=3, padx=5)
+                    setattr(self, f"{unit}_name_btn", btn)
                 
                 # Add offset control for days of week
                 if unit == "days_of_week":
@@ -973,28 +995,39 @@ class TimelineEditor(ttk.Frame):
                                                      textvariable=self.day_week_offset_var, state="disabled")
                     self.offset_spinbox.grid(row=i, column=5, padx=5)
         
-        # BC/AD Configuration
-        bc_ad_frame = ttk.LabelFrame(config_frame, text="BC/AD Dating", padding="5")
+        # Add BC/AD configuration below the time units (only when ages are disabled)
+        bc_ad_frame = ttk.LabelFrame(self.config_frame, text="BC/AD Dating", padding="5")
         bc_ad_frame.pack(fill=tk.X, pady=(10, 0))
         
-        # Label text boxes (greyed out)
-        ttk.Label(bc_ad_frame, text="BC Label:", foreground="gray").grid(row=0, column=0, sticky="w", padx=5)
-        self.bc_var = tk.StringVar(value=self.config_data.get("bc_label", "BC"))
-        self.bc_entry = ttk.Entry(bc_ad_frame, width=10, state="disabled", textvariable=self.bc_var)
-        self.bc_var.trace_add('write', self._update_bc_ad_labels)
-        self.bc_entry.grid(row=0, column=1, padx=5)
-        
-        ttk.Label(bc_ad_frame, text="AD Label:", foreground="gray").grid(row=0, column=2, sticky="w", padx=5)
-        self.ad_var = tk.StringVar(value=self.config_data.get("ad_label", "AD"))
-        self.ad_entry = ttk.Entry(bc_ad_frame, width=10, state="disabled", textvariable=self.ad_var)
-        self.ad_var.trace_add('write', self._update_bc_ad_labels)
-        self.ad_entry.grid(row=0, column=3, padx=5)
-        
-        # Checkbox
+        # Enable checkbox
         self.bc_ad_var = tk.BooleanVar(value=self.config_data.get("bc_ad_enabled", False))
         self.bc_ad_checkbox = ttk.Checkbutton(bc_ad_frame, text="Enable BC/AD Dating", 
                                              variable=self.bc_ad_var, command=self._toggle_bc_ad)
-        self.bc_ad_checkbox.grid(row=1, column=0, columnspan=4, sticky="w", pady=5)
+        self.bc_ad_checkbox.grid(row=0, column=0, columnspan=4, sticky="w", pady=5)
+        
+        # BC Label and Years
+        ttk.Label(bc_ad_frame, text="BC Label:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.bc_var = tk.StringVar(value=self.config_data.get("bc_label", "BC"))
+        self.bc_var.trace_add('write', self._update_bc_ad_labels)
+        self.bc_entry = ttk.Entry(bc_ad_frame, width=10, textvariable=self.bc_var)
+        self.bc_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(bc_ad_frame, text="BC Years:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        self.bc_years_var = tk.IntVar(value=self.config_data.get("bc_years", 100))
+        self.bc_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.bc_years_var)
+        self.bc_years_spinbox.grid(row=1, column=3, padx=5, pady=5)
+        
+        # AD Label and Years
+        ttk.Label(bc_ad_frame, text="AD Label:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.ad_var = tk.StringVar(value=self.config_data.get("ad_label", "AD"))
+        self.ad_var.trace_add('write', self._update_bc_ad_labels)
+        self.ad_entry = ttk.Entry(bc_ad_frame, width=10, textvariable=self.ad_var)
+        self.ad_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(bc_ad_frame, text="AD Years:").grid(row=2, column=2, padx=5, pady=5, sticky="w")
+        self.ad_years_var = tk.IntVar(value=self.config_data.get("ad_years", 100))
+        self.ad_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.ad_years_var)
+        self.ad_years_spinbox.grid(row=2, column=3, padx=5, pady=5)
 
         # Time Scrubber Section  
         scrubber_frame = ttk.LabelFrame(self, text="Time Navigator", padding="10")
@@ -1004,6 +1037,20 @@ class TimelineEditor(ttk.Frame):
         self.time_display = ttk.Label(scrubber_frame, text="", font=('Helvetica', 14, 'bold'))
         self.time_display.pack(pady=5)
         
+        # Master timeline scrubber
+        master_frame = ttk.Frame(scrubber_frame)
+        master_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(master_frame, text="Master Timeline:").pack(side=tk.LEFT, padx=(0, 5))
+        self.master_timeline_var = tk.IntVar(value=0)
+        self.master_timeline_scale = ttk.Scale(master_frame, from_=0, to=1000000, orient=tk.HORIZONTAL,
+                                              variable=self.master_timeline_var, command=self._update_from_master_timeline)
+        self.master_timeline_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.master_timeline_scale.bind("<MouseWheel>", lambda e: self._scroll_master_timeline(e))
+        
+        # Update master timeline range
+        self._update_master_timeline_range()
+        
         # Hierarchical scrubbers
         controls_frame = ttk.Frame(scrubber_frame)
         controls_frame.pack(fill=tk.X)
@@ -1012,40 +1059,53 @@ class TimelineEditor(ttk.Frame):
         # Age scrubber
         ttk.Label(controls_frame, text="Age:").grid(row=0, column=0, padx=5)
         self.age_scale = ttk.Scale(controls_frame, from_=1, to=10, orient=tk.HORIZONTAL,
-                                  variable=self.current_age, command=self._update_display)
+                                  variable=self.current_age, command=self._update_age_change)
         self.age_scale.grid(row=0, column=1, sticky="ew", padx=5)
+        self.age_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_age))
         
         # Year scrubber
         ttk.Label(controls_frame, text="Year:").grid(row=1, column=0, padx=5)
         year_count = self.config_data["time_units"]["years"]["count"]
         if self.config_data.get("bc_ad_enabled", False):
-            # Skip year 0: go from -year_count to -1, then 1 to year_count
-            year_from = -year_count
-            year_to = year_count
+            # Use separate BC and AD year ranges
+            bc_years = self.config_data.get("bc_years", 100)
+            ad_years = self.config_data.get("ad_years", 100)
+            year_from = -bc_years
+            year_to = ad_years
         else:
             year_from = 1
             year_to = year_count
         self.year_scale = ttk.Scale(controls_frame, from_=year_from, to=year_to, orient=tk.HORIZONTAL,
-                                   variable=self.current_year, command=self._update_display)
+                                   variable=self.current_year, command=self._update_day_of_month)
         self.year_scale.grid(row=1, column=1, sticky="ew", padx=5)
+        self.year_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_year))
         
         # Month scrubber  
         ttk.Label(controls_frame, text="Month:").grid(row=2, column=0, padx=5)
         self.month_scale = ttk.Scale(controls_frame, from_=1, to=12, orient=tk.HORIZONTAL,
-                                    variable=self.current_month, command=self._update_display)
+                                    variable=self.current_month, command=self._update_day_of_month)
         self.month_scale.grid(row=2, column=1, sticky="ew", padx=5)
+        self.month_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_month))
         
         # Day of month scrubber
         ttk.Label(controls_frame, text="Day of Month:").grid(row=3, column=0, padx=5)
         self.day_month_scale = ttk.Scale(controls_frame, from_=1, to=30, orient=tk.HORIZONTAL, 
                                         variable=self.current_day_of_month, command=self._update_day_of_month)
         self.day_month_scale.grid(row=3, column=1, sticky="ew", padx=5)
+        self.day_month_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_day_of_month))
         
         controls_frame.columnconfigure(1, weight=1)
         
         # Events Section
         events_frame = ttk.LabelFrame(self, text="Timeline Events", padding="10")
         events_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Hotkey legend
+        legend_frame = ttk.Frame(events_frame)
+        legend_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        legend_text = "Hotkeys: Enter=Edit Event | Shift+Enter=New Event | Ctrl+Enter=New Sub-Event | Del=Delete Event"
+        ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
         
         # Event management buttons
         btn_frame = ttk.Frame(events_frame)
@@ -1072,6 +1132,20 @@ class TimelineEditor(ttk.Frame):
         
         self.events_tree.configure(yscrollcommand=events_scrollbar.set)
         self.events_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Bind hotkeys to the events tree
+        self.events_tree.bind('<Return>', self._hotkey_edit_event)
+        self.events_tree.bind('<Shift-Return>', self._hotkey_add_event)
+        self.events_tree.bind('<Control-Return>', self._hotkey_add_sub_event)
+        self.events_tree.bind('<Delete>', self._hotkey_delete_event)
+        
+        # Explicitly bind arrow keys to ensure navigation works
+        self.events_tree.bind('<Up>', self._navigate_up)
+        self.events_tree.bind('<Down>', self._navigate_down)
+        self.events_tree.bind('<Left>', self._navigate_left)
+        self.events_tree.bind('<Right>', self._navigate_right)
+        
+        self.events_tree.focus_set()  # Allow tree to receive key events
 
         # Initialize BC/AD state after all widgets are created
         self._toggle_bc_ad()
@@ -1083,19 +1157,41 @@ class TimelineEditor(ttk.Frame):
             if unit in self.config_data["time_units"]:
                 self._toggle_unit_visibility(unit)
 
+    def _toggle_config_panel(self):
+        """Toggle the visibility of the configuration panel."""
+        if self.config_collapsed.get():
+            # Expand
+            self.config_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+            self.config_toggle_btn.config(text="▼ Time Configuration")
+            self.config_collapsed.set(False)
+        else:
+            # Collapse
+            self.config_frame.pack_forget()
+            self.config_toggle_btn.config(text="▶ Time Configuration")
+            self.config_collapsed.set(True)
+
     def _update_ranges(self):
         """Update scrubber ranges based on configuration."""
         self.age_scale.config(to=self.ages_count_var.get())
         
         # Update year range based on BC/AD setting
-        year_count = self.years_count_var.get()
         if self.config_data.get("bc_ad_enabled", False):
-            self.year_scale.config(from_=-year_count, to=year_count)
+            bc_years = self.config_data.get("bc_years", 100)
+            ad_years = self.config_data.get("ad_years", 100)
+            self.year_scale.config(from_=-bc_years, to=ad_years)
             # Ensure current year is not 0
             if self.current_year.get() == 0:
                 self.current_year.set(1)
         else:
-            self.year_scale.config(from_=1, to=year_count)
+            # Check if ages are enabled and get years for current age
+            visible_units = self.config_data.get("visible_units", {})
+            if visible_units.get("ages", True):
+                current_age = int(self.current_age.get())
+                years_in_current_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+                self.year_scale.config(from_=1, to=years_in_current_age)
+            else:
+                year_count = self.years_count_var.get()
+                self.year_scale.config(from_=1, to=year_count)
             
         self.month_scale.config(to=self.months_count_var.get())
         self.day_month_scale.config(to=self.days_of_month_count_var.get())
@@ -1136,8 +1232,49 @@ class TimelineEditor(ttk.Frame):
         
         if count_spinbox:
             count_spinbox.config(state=state)
-        if name_btn:
+        if name_btn and unit != "years":  # Don't disable Name Years button
             name_btn.config(state=state)
+        
+        # Special handling: disable years and BC/AD when ages is enabled
+        if unit == "ages":
+            years_visible_var = getattr(self, "years_visible_var", None)
+            years_count_spinbox = getattr(self, "years_count_spinbox", None)
+            years_checkbox = getattr(self, "years_checkbox", None)
+            
+            # BC/AD controls
+            bc_ad_checkbox = getattr(self, "bc_ad_checkbox", None)
+            bc_entry = getattr(self, "bc_entry", None)
+            ad_entry = getattr(self, "ad_entry", None)
+            bc_years_spinbox = getattr(self, "bc_years_spinbox", None)
+            ad_years_spinbox = getattr(self, "ad_years_spinbox", None)
+            
+            if years_visible_var and years_count_spinbox and years_checkbox:
+                if visible:  # Ages is enabled, disable years and BC/AD
+                    years_visible_var.set(False)
+                    years_count_spinbox.config(state="disabled")
+                    years_checkbox.config(state="disabled")
+                    
+                    # Disable BC/AD controls
+                    if bc_ad_checkbox:
+                        self.bc_ad_var.set(False)
+                        bc_ad_checkbox.config(state="disabled")
+                    if bc_entry:
+                        bc_entry.config(state="disabled")
+                    if ad_entry:
+                        ad_entry.config(state="disabled")
+                    if bc_years_spinbox:
+                        bc_years_spinbox.config(state="disabled")
+                    if ad_years_spinbox:
+                        ad_years_spinbox.config(state="disabled")
+                        
+                else:  # Ages is disabled, allow years and BC/AD to be enabled
+                    years_count_spinbox.config(state="normal")
+                    years_checkbox.config(state="normal")
+                    
+                    # Enable BC/AD controls
+                    if bc_ad_checkbox:
+                        bc_ad_checkbox.config(state="normal")
+                    self._toggle_bc_ad()  # Update BC/AD entry states based on checkbox
             
         # Special handling for days of week offset
         if unit == "days_of_week" and hasattr(self, 'offset_spinbox'):
@@ -1170,49 +1307,186 @@ class TimelineEditor(ttk.Frame):
     def _update_navigator_visibility(self):
         """Update visibility of navigator controls based on configuration."""
         visible_units = self.config_data.get("visible_units", {})
+        ages_enabled = visible_units.get("ages", True)
+        years_enabled = visible_units.get("years", True)
         
         # Store widget pairs for easier management
         widget_pairs = []
-        if hasattr(self, 'age_scale'):
-            # Find age label
+        if hasattr(self, 'age_scale') and ages_enabled:
+            # Find age label - show when Ages checkbox is checked
             for widget in self.controls_frame.winfo_children():
                 if isinstance(widget, ttk.Label) and widget.cget("text") == "Age:":
                     widget_pairs.append(("ages", widget, self.age_scale))
                     break
         
-        if hasattr(self, 'year_scale'):
-            # Find year label
+        if hasattr(self, 'year_scale') and (ages_enabled or years_enabled):
+            # Find year label - show when Ages OR Years checkbox is checked
             for widget in self.controls_frame.winfo_children():
                 if isinstance(widget, ttk.Label) and widget.cget("text") == "Year:":
                     widget_pairs.append(("years", widget, self.year_scale))
                     break
         
         if hasattr(self, 'month_scale'):
-            # Find month label
+            # Find month label - show when Months checkbox is checked
             for widget in self.controls_frame.winfo_children():
                 if isinstance(widget, ttk.Label) and widget.cget("text") == "Month:":
-                    widget_pairs.append(("months", widget, self.month_scale))
+                    if visible_units.get("months", True):
+                        widget_pairs.append(("months", widget, self.month_scale))
                     break
         
         if hasattr(self, 'day_month_scale'):
-            # Find day of month label
+            # Find day of month label - show when Days of Month checkbox is checked
             for widget in self.controls_frame.winfo_children():
                 if isinstance(widget, ttk.Label) and widget.cget("text") == "Day of Month:":
-                    widget_pairs.append(("days_of_month", widget, self.day_month_scale))
+                    if visible_units.get("days_of_month", True):
+                        widget_pairs.append(("days_of_month", widget, self.day_month_scale))
                     break
         
         # Hide all widgets first
-        for unit, label, scale in widget_pairs:
-            label.grid_remove()
-            scale.grid_remove()
+        for widget in self.controls_frame.winfo_children():
+            widget.grid_remove()
         
         # Show visible widgets in condensed layout
         row = 0
         for unit, label, scale in widget_pairs:
-            if visible_units.get(unit, True):
-                label.grid(row=row, column=0, padx=5)
-                scale.grid(row=row, column=1, sticky="ew", padx=5)
-                row += 1
+            label.grid(row=row, column=0, padx=5)
+            scale.grid(row=row, column=1, sticky="ew", padx=5)
+            row += 1
+
+    def _update_master_timeline_range(self):
+        """Calculate and set the range for the master timeline scrubber."""
+        # Calculate total possible days in the timeline
+        ages_count = self.config_data["time_units"]["ages"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        
+        total_days = 0
+        for age in range(1, ages_count + 1):
+            years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(age), 100)
+            total_days += years_in_age * months_per_year * days_per_month
+        
+        self.master_timeline_scale.config(to=max(total_days - 1, 1))
+
+    def _get_cumulative_days(self):
+        """Get current cumulative days from timeline position."""
+        day_of_month = int(self.current_day_of_month.get())
+        month = int(self.current_month.get())
+        year = int(self.current_year.get())
+        age = int(self.current_age.get())
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        
+        # Calculate cumulative years from all previous ages
+        cumulative_years_from_ages = 0
+        for prev_age in range(1, age):
+            years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+            cumulative_years_from_ages += years_in_prev_age
+        
+        year_offset = year - 1 if year > 0 else year
+        cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                          year_offset * months_per_year * days_per_month + 
+                          (month - 1) * days_per_month + (day_of_month - 1))
+        return cumulative_days
+
+    def _set_from_cumulative_days(self, cumulative_days):
+        """Set timeline position from cumulative days."""
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        
+        remaining_days = cumulative_days
+        
+        # Find the age
+        age = 1
+        ages_count = self.config_data["time_units"]["ages"]["count"]
+        for current_age in range(1, ages_count + 1):
+            years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+            days_in_age = years_in_age * months_per_year * days_per_month
+            
+            if remaining_days < days_in_age:
+                age = current_age
+                break
+            remaining_days -= days_in_age
+        
+        # Find year within age
+        days_per_year = months_per_year * days_per_month
+        year = (remaining_days // days_per_year) + 1
+        remaining_days = remaining_days % days_per_year
+        
+        # Find month within year
+        month = (remaining_days // days_per_month) + 1
+        remaining_days = remaining_days % days_per_month
+        
+        # Find day within month
+        day_of_month = remaining_days + 1
+        
+        # Update scrubbers without triggering callbacks
+        self.current_age.set(age)
+        self.current_year.set(year)
+        self.current_month.set(month)
+        self.current_day_of_month.set(day_of_month)
+
+    def _update_from_master_timeline(self, *args):
+        """Update individual scrubbers from master timeline position."""
+        self._updating_from_master = True
+        cumulative_days = int(self.master_timeline_var.get())
+        self._set_from_cumulative_days(cumulative_days)
+        self._update_day_of_month()
+        self._updating_from_master = False
+
+    def _scroll_master_timeline(self, event):
+        """Handle mouse wheel scrolling on master timeline."""
+        current = self.master_timeline_var.get()
+        new_value = current + 1 if event.delta > 0 else current - 1
+        
+        min_val = self.master_timeline_scale.cget('from')
+        max_val = self.master_timeline_scale.cget('to')
+        
+        if min_val <= new_value <= max_val:
+            self.master_timeline_var.set(new_value)
+            self._update_from_master_timeline()
+
+    def _update_age_change(self, *args):
+        """Handle age changes and update year range accordingly."""
+        # Update year range for the new age
+        visible_units = self.config_data.get("visible_units", {})
+        if visible_units.get("ages", True) and not self.config_data.get("bc_ad_enabled", False):
+            current_age = int(self.current_age.get())
+            years_in_current_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+            self.year_scale.config(from_=1, to=years_in_current_age)
+            
+            # Reset year to 1 if current year exceeds the new age's year limit
+            if self.current_year.get() > years_in_current_age:
+                self.current_year.set(1)
+        
+        self._update_day_of_month()
+
+    def _scroll_scale(self, event, var):
+        """Handle mouse wheel scrolling on scale widgets."""
+        current = var.get()
+        new_value = current + 1 if event.delta > 0 else current - 1
+        
+        # Get the scale widget's min/max values
+        if var == self.current_age:
+            scale = self.age_scale
+        elif var == self.current_year:
+            scale = self.year_scale
+        elif var == self.current_month:
+            scale = self.month_scale
+        elif var == self.current_day_of_month:
+            scale = self.day_month_scale
+        else:
+            return
+            
+        min_val = scale.cget('from')
+        max_val = scale.cget('to')
+        
+        if min_val <= new_value <= max_val:
+            var.set(new_value)
+            # Call appropriate update method based on which variable changed
+            if var == self.current_age:
+                self._update_age_change()
+            else:
+                self._update_day_of_month()
 
     def _update_day_week_offset(self, *args):
         """Update day week offset and recalculate day of week."""
@@ -1222,14 +1496,36 @@ class TimelineEditor(ttk.Frame):
     def _update_day_of_month(self, *args):
         """Update day of month and calculate corresponding day of week."""
         day_of_month = int(self.current_day_of_month.get())
+        month = int(self.current_month.get())
+        year = int(self.current_year.get())
+        age = int(self.current_age.get())
         days_per_week = self.config_data["time_units"]["days_of_week"]["count"]
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
         offset = self.config_data.get("day_week_offset", 0)
         
-        # Calculate day of week based on day of month with offset (1-based)
-        day_of_week = ((day_of_month - 1 + offset) % days_per_week) + 1
+        # Calculate cumulative days from start of timeline
+        age_offset = age - 1
+        year_offset = year - 1 if year > 0 else year  # Handle BC years
+        
+        # Calculate cumulative years from all previous ages
+        cumulative_years_from_ages = 0
+        for prev_age in range(1, age):
+            years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+            cumulative_years_from_ages += years_in_prev_age
+        
+        cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                          year_offset * months_per_year * days_per_month + 
+                          (month - 1) * days_per_month + (day_of_month - 1))
+        day_of_week = ((cumulative_days + offset) % days_per_week) + 1
         self.current_day_of_week.set(day_of_week)
         
         self._update_display()
+        
+        # Update master timeline to reflect current position (avoid recursion)
+        if not hasattr(self, '_updating_from_master') or not self._updating_from_master:
+            cumulative_days = self._get_cumulative_days()
+            self.master_timeline_var.set(cumulative_days)
 
     def _handle_year_zero(self, *args):
         """Skip year 0 when BC/AD is enabled."""
@@ -1249,9 +1545,13 @@ class TimelineEditor(ttk.Frame):
         if enabled:
             self.bc_entry.config(state="normal")
             self.ad_entry.config(state="normal")
+            self.bc_years_spinbox.config(state="normal")
+            self.ad_years_spinbox.config(state="normal")
         else:
             self.bc_entry.config(state="disabled")
             self.ad_entry.config(state="disabled")
+            self.bc_years_spinbox.config(state="disabled")
+            self.ad_years_spinbox.config(state="disabled")
             # Reset negative years to positive when BC/AD is disabled
             if self.current_year.get() <= 0:
                 self.current_year.set(1)
@@ -1260,11 +1560,42 @@ class TimelineEditor(ttk.Frame):
         if enabled:
             self.config_data["bc_label"] = self.bc_var.get()
             self.config_data["ad_label"] = self.ad_var.get()
+            self.config_data["bc_years"] = self.bc_years_var.get()
+            self.config_data["ad_years"] = self.ad_years_var.get()
         
         # Update year range
         self._update_ranges()
         self._update_display()
         self._populate_events()  # Refresh events display with new BC/AD formatting
+
+    def _configure_ages(self):
+        """Open dialog to configure ages with BC/AD settings."""
+        dialog = AgeConfigDialog(self, self.config_data["time_units"]["ages"], self.config_data)
+        if dialog.result:
+            self.config_data["time_units"]["ages"]["names"] = dialog.result["names"]
+            self.config_data["time_units"]["ages"]["years_per_age"] = dialog.result["years_per_age"]
+            self.config_data.update(dialog.result["bc_ad_config"])
+            self.bc_ad_var.set(self.config_data.get("bc_ad_enabled", False))
+            self.bc_var.set(self.config_data.get("bc_label", "BC"))
+            self.ad_var.set(self.config_data.get("ad_label", "AD"))
+            self._toggle_bc_ad()
+            self._update_ranges()
+            self._update_navigator_visibility()
+            self._update_display()
+            self._populate_events()
+
+    def _configure_bc_ad(self):
+        """Open dialog to configure BC/AD settings."""
+        dialog = BCADConfigDialog(self, self.config_data)
+        if dialog.result:
+            self.config_data.update(dialog.result)
+            self.bc_ad_var.set(self.config_data.get("bc_ad_enabled", False))
+            self.bc_var.set(self.config_data.get("bc_label", "BC"))
+            self.ad_var.set(self.config_data.get("ad_label", "AD"))
+            self._toggle_bc_ad()
+            self._update_ranges()
+            self._update_display()
+            self._populate_events()
 
     def _configure_day_names(self, unit):
         """Configure names for days with mutual exclusion."""
@@ -1309,23 +1640,23 @@ class TimelineEditor(ttk.Frame):
         name = names.get(str(value), "")
         
         # Handle BC/AD for years
-        if unit == "years" and self.config_data.get("bc_ad_enabled", False):
-            if name.strip():
-                return name
-            else:
+        if unit == "years":
+            if self.config_data.get("bc_ad_enabled", False):
                 if value <= 0:
                     return f"{abs(value)} {self.config_data.get('bc_label', 'BC')}"
                 else:
                     return f"{value} {self.config_data.get('ad_label', 'AD')}"
+            elif name.strip():
+                return name
+            else:
+                return f"Year {value}"
         
-        # Add prefixes for ages, years and days of month when not renamed
+        # Add prefixes for ages and days of month when not renamed
         if name.strip():
             return name
         else:
             if unit == "ages":
                 return f"Age {value}"
-            elif unit == "years":
-                return f"Year {value}"
             elif unit == "days_of_month":
                 return f"Day {value}"
             else:
@@ -1340,7 +1671,8 @@ class TimelineEditor(ttk.Frame):
             age_name = self._get_time_name("ages", int(self.current_age.get()))
             display_parts.append(age_name)
             
-        if visible_units.get("years", True):
+        # Show years if Years is enabled OR Ages is enabled (since ages need years)
+        if visible_units.get("years", True) or visible_units.get("ages", True):
             year_name = self._get_time_name("years", int(self.current_year.get()))
             display_parts.append(year_name)
             
@@ -1363,6 +1695,76 @@ class TimelineEditor(ttk.Frame):
         
         # Highlight matching events
         self._highlight_matching_events()
+
+    def _navigate_up(self, event):
+        """Handle up arrow key navigation."""
+        selection = self.events_tree.selection()
+        if selection:
+            current = selection[0]
+            prev_item = self.events_tree.prev(current)
+            if prev_item:
+                self.events_tree.selection_set(prev_item)
+                self.events_tree.see(prev_item)
+        return 'break'
+
+    def _navigate_down(self, event):
+        """Handle down arrow key navigation."""
+        selection = self.events_tree.selection()
+        if selection:
+            current = selection[0]
+            next_item = self.events_tree.next(current)
+            if next_item:
+                self.events_tree.selection_set(next_item)
+                self.events_tree.see(next_item)
+        return 'break'
+
+    def _navigate_left(self, event):
+        """Handle left arrow key navigation (collapse)."""
+        selection = self.events_tree.selection()
+        if selection:
+            current = selection[0]
+            if self.events_tree.item(current, 'open'):
+                self.events_tree.item(current, open=False)
+            else:
+                parent = self.events_tree.parent(current)
+                if parent:
+                    self.events_tree.selection_set(parent)
+                    self.events_tree.see(parent)
+        return 'break'
+
+    def _navigate_right(self, event):
+        """Handle right arrow key navigation (expand)."""
+        selection = self.events_tree.selection()
+        if selection:
+            current = selection[0]
+            if self.events_tree.get_children(current):
+                if not self.events_tree.item(current, 'open'):
+                    self.events_tree.item(current, open=True)
+                else:
+                    first_child = self.events_tree.get_children(current)[0]
+                    self.events_tree.selection_set(first_child)
+                    self.events_tree.see(first_child)
+        return 'break'
+
+    def _hotkey_edit_event(self, event):
+        """Hotkey handler for editing selected event (Enter)."""
+        self._edit_event()
+        return 'break'  # Prevent default behavior
+
+    def _hotkey_add_event(self, event):
+        """Hotkey handler for adding new event (Shift+Enter)."""
+        self._add_event()
+        return 'break'
+
+    def _hotkey_add_sub_event(self, event):
+        """Hotkey handler for adding sub-event (Ctrl+Enter)."""
+        self._add_sub_event()
+        return 'break'
+
+    def _hotkey_delete_event(self, event):
+        """Hotkey handler for deleting event (Delete)."""
+        self._delete_event()
+        return 'break'
 
     def _add_event(self):
         """Add a new timeline event."""
@@ -1403,7 +1805,7 @@ class TimelineEditor(ttk.Frame):
                 "day_of_month": int(self.current_day_of_month.get())
             }
             
-            dialog = TimelineEventDialog(self, current_time)
+            dialog = TimelineEventDialog(self, current_time, title="Add Sub-Event")
             if dialog.result:
                 # Add sub_events list if it doesn't exist
                 if "sub_events" not in self.config_data["events"][event_index]:
@@ -1625,7 +2027,8 @@ class TimelineEditor(ttk.Frame):
         
         if visible_units.get("ages", True) and time1.get("age") != time2.get("age"):
             return False
-        if visible_units.get("years", True) and time1.get("year") != time2.get("year"):
+        # Check years if Years is enabled OR Ages is enabled (since ages need years)
+        if (visible_units.get("years", True) or visible_units.get("ages", True)) and time1.get("year") != time2.get("year"):
             return False
         if visible_units.get("months", True) and time1.get("month") != time2.get("month"):
             return False
@@ -1653,7 +2056,8 @@ class TimelineEditor(ttk.Frame):
             age_name = self._get_time_name("ages", time_data.get('age', 1))
             display_parts.append(age_name)
             
-        if visible_units.get("years", True):
+        # Show years if Years is enabled OR Ages is enabled (since ages need years)
+        if visible_units.get("years", True) or visible_units.get("ages", True):
             year_name = self._get_time_name("years", time_data.get('year', 1))
             display_parts.append(year_name)
             
@@ -1678,6 +2082,210 @@ class TimelineEditor(ttk.Frame):
         return json.dumps(self.config_data, indent=4)
 
 
+class AgeConfigDialog(tk.Toplevel):
+    """Dialog for configuring ages with BC/AD settings."""
+    def __init__(self, parent, unit_data, config_data):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Configure Ages")
+        self.result = None
+        self.unit_data = unit_data
+        self.config_data = config_data
+        
+        self.geometry("500x400")
+        self._create_widgets()
+        
+        # Bind Enter and Escape keys
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        
+        self.wait_window(self)
+
+    def _create_widgets(self):
+        container = ttk.Frame(self)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Scrollable frame for age entries
+        canvas = tk.Canvas(container, height=250)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Headers
+        ttk.Label(scrollable_frame, text="Dating System", font=('Helvetica', 10, 'bold')).grid(row=0, column=0, columnspan=5, pady=10)
+        
+        # Radio buttons for dating system choice
+        self.dating_system = tk.StringVar(value="ages" if not self.config_data.get("bc_ad_enabled", False) else "epochal")
+        ttk.Radiobutton(scrollable_frame, text="Ages/Epochs (Age 1, Age 2...)", 
+                       variable=self.dating_system, value="ages", 
+                       command=self._toggle_dating_system).grid(row=1, column=0, columnspan=5, sticky="w", pady=5)
+        ttk.Radiobutton(scrollable_frame, text="Epochal Dating (BC/AD style)", 
+                       variable=self.dating_system, value="epochal", 
+                       command=self._toggle_dating_system).grid(row=2, column=0, columnspan=5, sticky="w", pady=5)
+        
+        # Ages configuration (shown when ages system selected)
+        self.ages_frame = ttk.Frame(scrollable_frame)
+        self.ages_frame.grid(row=3, column=0, columnspan=5, sticky="ew", pady=10)
+        
+        ttk.Label(self.ages_frame, text="Age", font=('Helvetica', 9, 'bold')).grid(row=0, column=0, padx=5, pady=5)
+        ttk.Label(self.ages_frame, text="Name", font=('Helvetica', 9, 'bold')).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(self.ages_frame, text="Years", font=('Helvetica', 9, 'bold')).grid(row=0, column=2, padx=5, pady=5)
+        
+        # Epochal configuration (shown when epochal system selected)  
+        self.epochal_frame = ttk.Frame(scrollable_frame)
+        self.epochal_frame.grid(row=4, column=0, columnspan=5, sticky="ew", pady=10)
+        
+        ttk.Label(self.epochal_frame, text="Before Label:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.bc_var = tk.StringVar(value=self.config_data.get("bc_label", "BC"))
+        ttk.Entry(self.epochal_frame, textvariable=self.bc_var, width=10).grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.epochal_frame, text="BC Years:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.bc_years_var = tk.IntVar(value=self.config_data.get("bc_years", 100))
+        ttk.Spinbox(self.epochal_frame, from_=1, to=999999, width=8, textvariable=self.bc_years_var).grid(row=0, column=3, padx=5, pady=5)
+        
+        ttk.Label(self.epochal_frame, text="After Label:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.ad_var = tk.StringVar(value=self.config_data.get("ad_label", "AD"))
+        ttk.Entry(self.epochal_frame, textvariable=self.ad_var, width=10).grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.epochal_frame, text="AD Years:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        self.ad_years_var = tk.IntVar(value=self.config_data.get("ad_years", 100))
+        ttk.Spinbox(self.epochal_frame, from_=1, to=999999, width=8, textvariable=self.ad_years_var).grid(row=1, column=3, padx=5, pady=5)
+        
+        self.name_vars = {}
+        self.years_vars = {}
+        
+        for i in range(1, self.unit_data["count"] + 1):
+            # Age number and name (for ages system)
+            ttk.Label(self.ages_frame, text=f"{i}:").grid(row=i, column=0, padx=5, pady=2, sticky="w")
+            name_var = tk.StringVar(value=self.unit_data["names"].get(str(i), ""))
+            self.name_vars[str(i)] = name_var
+            ttk.Entry(self.ages_frame, textvariable=name_var, width=20).grid(row=i, column=1, padx=5, pady=2)
+            
+            # Years per age
+            years_var = tk.IntVar(value=self.unit_data.get("years_per_age", {}).get(str(i), 100))
+            self.years_vars[str(i)] = years_var
+            ttk.Spinbox(self.ages_frame, from_=1, to=999999, width=8, textvariable=years_var).grid(row=i, column=2, padx=5, pady=2)
+        
+        self._toggle_dating_system()
+        
+        canvas.pack(side="top", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Buttons
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(side="bottom", fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=5)
+
+    def _toggle_dating_system(self):
+        """Toggle between ages and epochal dating systems."""
+        if self.dating_system.get() == "ages":
+            self.ages_frame.grid()
+            self.epochal_frame.grid_remove()
+        else:
+            self.ages_frame.grid_remove()
+            self.epochal_frame.grid()
+
+    def _ok(self):
+        names = {k: v.get().strip() for k, v in self.name_vars.items()}
+        years_per_age = {k: v.get() for k, v in self.years_vars.items()}
+        
+        if self.dating_system.get() == "epochal":
+            # Epochal dating system
+            bc_ad_config = {
+                "bc_ad_enabled": True,
+                "bc_label": self.bc_var.get(),
+                "ad_label": self.ad_var.get(),
+                "bc_years": self.bc_years_var.get(),
+                "ad_years": self.ad_years_var.get()
+            }
+        else:
+            # Ages dating system
+            bc_ad_config = {
+                "bc_ad_enabled": False,
+                "bc_label": "BC",
+                "ad_label": "AD"
+            }
+        
+        self.result = {
+            "names": names,
+            "years_per_age": years_per_age,
+            "bc_ad_config": bc_ad_config
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class BCADConfigDialog(tk.Toplevel):
+    """Dialog for configuring BC/AD settings."""
+    def __init__(self, parent, config_data):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("BC/AD Configuration")
+        self.result = None
+        self.config_data = config_data
+        
+        self.geometry("300x150")
+        self._create_widgets()
+        
+        # Bind Enter and Escape keys
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        
+        self.wait_window(self)
+
+    def _create_widgets(self):
+        # Enable checkbox
+        self.bc_ad_var = tk.BooleanVar(value=self.config_data.get("bc_ad_enabled", False))
+        ttk.Checkbutton(self, text="Enable BC/AD Dating", variable=self.bc_ad_var, 
+                       command=self._toggle_entries).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=10)
+        
+        # BC Label
+        ttk.Label(self, text="BC Label:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        self.bc_var = tk.StringVar(value=self.config_data.get("bc_label", "BC"))
+        self.bc_entry = ttk.Entry(self, width=10, textvariable=self.bc_var)
+        self.bc_entry.grid(row=1, column=1, padx=10, pady=5)
+        
+        # AD Label
+        ttk.Label(self, text="AD Label:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        self.ad_var = tk.StringVar(value=self.config_data.get("ad_label", "AD"))
+        self.ad_entry = ttk.Entry(self, width=10, textvariable=self.ad_var)
+        self.ad_entry.grid(row=2, column=1, padx=10, pady=5)
+        
+        # Buttons
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
+        
+        self._toggle_entries()
+
+    def _toggle_entries(self):
+        state = "normal" if self.bc_ad_var.get() else "disabled"
+        self.bc_entry.config(state=state)
+        self.ad_entry.config(state=state)
+
+    def _ok(self):
+        self.result = {
+            "bc_ad_enabled": self.bc_ad_var.get(),
+            "bc_label": self.bc_var.get(),
+            "ad_label": self.ad_var.get()
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class TimeUnitNamingDialog(tk.Toplevel):
     """Dialog for naming time units."""
     def __init__(self, parent, unit_type, unit_data):
@@ -1690,6 +2298,11 @@ class TimeUnitNamingDialog(tk.Toplevel):
         
         self.geometry("400x400")
         self._create_widgets()
+        
+        # Bind Enter and Escape keys
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        
         self.wait_window(self)
 
     def _create_widgets(self):
@@ -1739,18 +2352,40 @@ class TimeUnitNamingDialog(tk.Toplevel):
 
 class TimelineEventDialog(tk.Toplevel):
     """Dialog for creating timeline events."""
-    def __init__(self, parent, current_time, existing_event=None):
+    def __init__(self, parent, current_time, existing_event=None, title=None):
         super().__init__(parent)
         self.transient(parent)
         self.grab_set()
-        self.title("Edit Timeline Event" if existing_event else "Add Timeline Event")
+        
+        # Set title based on context
+        if title:
+            self.title(title)
+        elif existing_event:
+            self.title("Edit Timeline Event")
+        else:
+            self.title("Add Timeline Event")
+            
         self.result = None
         self.current_time = current_time
         self.existing_event = existing_event
         self.parent_editor = parent
         
+        # Store reference to events tree for focus management
+        self.events_tree = parent.events_tree
+        
         self.geometry("600x400")
         self._create_widgets()
+        
+        # Ensure dialog gets focus
+        self.focus_set()
+        self.lift()
+        self.attributes('-topmost', True)
+        self.after(100, lambda: self.attributes('-topmost', False))
+        
+        # Bind Enter and Escape keys
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        
         self.wait_window(self)
 
     def _create_widgets(self):
@@ -1802,17 +2437,26 @@ class TimelineEventDialog(tk.Toplevel):
             ttk.Label(parent, text="Age:").grid(row=row_offset, column=col, padx=5)
             var = tk.IntVar(value=time_data.get('age', 1))
             setattr(self, f"{prefix}_age_var", var)
-            ttk.Spinbox(parent, from_=1, to=999, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
+            age_count = self.parent_editor.config_data["time_units"]["ages"]["count"]
+            ttk.Spinbox(parent, from_=1, to=age_count, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
             col += 1
             
-        if visible_units.get("years", True):
+        if visible_units.get("years", True) or visible_units.get("ages", True):
             ttk.Label(parent, text="Year:").grid(row=row_offset, column=col, padx=5)
             var = tk.IntVar(value=time_data.get('year', 1))
             setattr(self, f"{prefix}_year_var", var)
-            year_count = self.parent_editor.config_data["time_units"]["years"]["count"]
+            
             if self.parent_editor.config_data.get("bc_ad_enabled", False):
-                ttk.Spinbox(parent, from_=-year_count, to=year_count, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
+                bc_years = self.parent_editor.config_data.get("bc_years", 100)
+                ad_years = self.parent_editor.config_data.get("ad_years", 100)
+                ttk.Spinbox(parent, from_=-bc_years, to=ad_years, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
+            elif visible_units.get("ages", True):
+                # Use years from current age
+                current_age = time_data.get('age', 1)
+                years_in_age = self.parent_editor.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+                ttk.Spinbox(parent, from_=1, to=years_in_age, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
             else:
+                year_count = self.parent_editor.config_data["time_units"]["years"]["count"]
                 ttk.Spinbox(parent, from_=1, to=year_count, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
             col += 1
             
@@ -1849,7 +2493,8 @@ class TimelineEventDialog(tk.Toplevel):
         
         if visible_units.get("ages", True) and hasattr(self, f"{prefix}_age_var"):
             time_data["age"] = getattr(self, f"{prefix}_age_var").get()
-        if visible_units.get("years", True) and hasattr(self, f"{prefix}_year_var"):
+        # Include years if Ages OR Years is enabled (since ages need years)
+        if (visible_units.get("years", True) or visible_units.get("ages", True)) and hasattr(self, f"{prefix}_year_var"):
             time_data["year"] = getattr(self, f"{prefix}_year_var").get()
         if visible_units.get("months", True) and hasattr(self, f"{prefix}_month_var"):
             time_data["month"] = getattr(self, f"{prefix}_month_var").get()
@@ -1857,10 +2502,27 @@ class TimelineEventDialog(tk.Toplevel):
             day_of_month = getattr(self, f"{prefix}_day_of_month_var").get()
             time_data["day_of_month"] = day_of_month
             
-            # Auto-calculate day of week with offset
+            # Calculate day of week using the same method as the main timeline
+            month = time_data.get("month", 1)
+            year = time_data.get("year", 1)
+            age = time_data.get("age", 1)
+            
             days_per_week = self.parent_editor.config_data["time_units"]["days_of_week"]["count"]
+            days_per_month = self.parent_editor.config_data["time_units"]["days_of_month"]["count"]
+            months_per_year = self.parent_editor.config_data["time_units"]["months"]["count"]
             offset = self.parent_editor.config_data.get("day_week_offset", 0)
-            day_of_week = ((day_of_month - 1 + offset) % days_per_week) + 1
+            
+            # Calculate cumulative years from all previous ages
+            cumulative_years_from_ages = 0
+            for prev_age in range(1, age):
+                years_in_prev_age = self.parent_editor.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+                cumulative_years_from_ages += years_in_prev_age
+            
+            year_offset = year - 1 if year > 0 else year
+            cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                              year_offset * months_per_year * days_per_month + 
+                              (month - 1) * days_per_month + (day_of_month - 1))
+            day_of_week = ((cumulative_days + offset) % days_per_week) + 1
             time_data["day_of_week"] = day_of_week
         elif visible_units.get("days_of_week", True):
             # If days of month is not visible but days of week is, use default
@@ -1889,6 +2551,23 @@ class TimelineEventDialog(tk.Toplevel):
     def _cancel(self):
         self.result = None
         self.destroy()
+    
+    def destroy(self):
+        """Override destroy to return focus to events tree."""
+        super().destroy()
+        # Return focus to events tree after dialog is destroyed
+        if hasattr(self, 'events_tree') and self.events_tree.winfo_exists():
+            def restore_focus():
+                self.events_tree.focus_force()  # Force focus instead of focus_set
+                self.events_tree.update()  # Ensure UI updates
+                # Ensure there's a selection for arrow key navigation
+                if not self.events_tree.selection():
+                    # Select the first item if nothing is selected
+                    children = self.events_tree.get_children()
+                    if children:
+                        self.events_tree.selection_set(children[0])
+                        self.events_tree.see(children[0])
+            self.events_tree.after(50, restore_focus)  # Longer delay
 class EventCreationDialog(tk.Toplevel):
     """Modal dialog for structured input of a single timeline event."""
     def __init__(self, parent, initial_data=None):
