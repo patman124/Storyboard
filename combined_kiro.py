@@ -1014,6 +1014,7 @@ class TimelineEditor(ttk.Frame):
         
         ttk.Label(bc_ad_frame, text="BC Years:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
         self.bc_years_var = tk.IntVar(value=self.config_data.get("bc_years", 100))
+        self.bc_years_var.trace_add('write', self._update_bc_ad_years)
         self.bc_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.bc_years_var)
         self.bc_years_spinbox.grid(row=1, column=3, padx=5, pady=5)
         
@@ -1026,6 +1027,7 @@ class TimelineEditor(ttk.Frame):
         
         ttk.Label(bc_ad_frame, text="AD Years:").grid(row=2, column=2, padx=5, pady=5, sticky="w")
         self.ad_years_var = tk.IntVar(value=self.config_data.get("ad_years", 100))
+        self.ad_years_var.trace_add('write', self._update_bc_ad_years)
         self.ad_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.ad_years_var)
         self.ad_years_spinbox.grid(row=2, column=3, padx=5, pady=5)
 
@@ -1215,6 +1217,13 @@ class TimelineEditor(ttk.Frame):
             self.config_data["ad_label"] = self.ad_var.get()
             self._update_display()
 
+    def _update_bc_ad_years(self, *args):
+        """Update BC/AD years in config when spinbox values change."""
+        if self.config_data.get("bc_ad_enabled", False):
+            self.config_data["bc_years"] = self.bc_years_var.get()
+            self.config_data["ad_years"] = self.ad_years_var.get()
+            self._update_ranges()
+
     def _toggle_unit_visibility(self, unit):
         """Toggle visibility of time unit and update UI state."""
         visible_var = getattr(self, f"{unit}_visible_var")
@@ -1355,37 +1364,62 @@ class TimelineEditor(ttk.Frame):
 
     def _update_master_timeline_range(self):
         """Calculate and set the range for the master timeline scrubber."""
-        # Calculate total possible days in the timeline
-        ages_count = self.config_data["time_units"]["ages"]["count"]
         months_per_year = self.config_data["time_units"]["months"]["count"]
         days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
         
-        total_days = 0
-        for age in range(1, ages_count + 1):
-            years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(age), 100)
-            total_days += years_in_age * months_per_year * days_per_month
-        
-        self.master_timeline_scale.config(to=max(total_days - 1, 1))
+        if self.config_data.get("bc_ad_enabled", False):
+            # For BC/AD, calculate total range from BC years to AD years, accounting for no year 0
+            bc_years = self.config_data.get("bc_years", 100)
+            ad_years = self.config_data.get("ad_years", 100)
+            
+            # Set range from negative BC days to positive AD days (minus 1 to account for no year 0)
+            min_days = -bc_years * months_per_year * days_per_month
+            max_days = (ad_years - 1) * months_per_year * days_per_month + (months_per_year * days_per_month - 1)
+            self.master_timeline_scale.config(from_=min_days, to=max_days)
+        else:
+            # For ages system, calculate as before
+            ages_count = self.config_data["time_units"]["ages"]["count"]
+            total_days = 0
+            for age in range(1, ages_count + 1):
+                years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(age), 100)
+                total_days += years_in_age * months_per_year * days_per_month
+            
+            self.master_timeline_scale.config(from_=0, to=max(total_days - 1, 1))
 
     def _get_cumulative_days(self):
         """Get current cumulative days from timeline position."""
         day_of_month = int(self.current_day_of_month.get())
         month = int(self.current_month.get())
         year = int(self.current_year.get())
-        age = int(self.current_age.get())
         days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
         months_per_year = self.config_data["time_units"]["months"]["count"]
         
-        # Calculate cumulative years from all previous ages
-        cumulative_years_from_ages = 0
-        for prev_age in range(1, age):
-            years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
-            cumulative_years_from_ages += years_in_prev_age
+        if self.config_data.get("bc_ad_enabled", False):
+            # For BC/AD, account for skipping year 0
+            if year > 0:
+                # AD years: subtract 1 from year to account for no year 0
+                adjusted_year = year - 1
+                cumulative_days = (adjusted_year * months_per_year * days_per_month + 
+                                  (month - 1) * days_per_month + (day_of_month - 1))
+            else:
+                # BC years: use year directly (already negative)
+                cumulative_days = (year * months_per_year * days_per_month + 
+                                  (month - 1) * days_per_month + (day_of_month - 1))
+        else:
+            # For ages system, calculate as before
+            age = int(self.current_age.get())
+            
+            # Calculate cumulative years from all previous ages
+            cumulative_years_from_ages = 0
+            for prev_age in range(1, age):
+                years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+                cumulative_years_from_ages += years_in_prev_age
+            
+            year_offset = year - 1 if year > 0 else year
+            cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                              year_offset * months_per_year * days_per_month + 
+                              (month - 1) * days_per_month + (day_of_month - 1))
         
-        year_offset = year - 1 if year > 0 else year
-        cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
-                          year_offset * months_per_year * days_per_month + 
-                          (month - 1) * days_per_month + (day_of_month - 1))
         return cumulative_days
 
     def _set_from_cumulative_days(self, cumulative_days):
@@ -1465,6 +1499,13 @@ class TimelineEditor(ttk.Frame):
         current = var.get()
         new_value = current + 1 if event.delta > 0 else current - 1
         
+        # Special handling for year scrolling when BC/AD is enabled
+        if var == self.current_year and self.config_data.get("bc_ad_enabled", False):
+            if current == 1 and event.delta < 0:  # Going from 1 AD to BC
+                new_value = -1  # Skip year 0, go to 1 BC
+            elif current == -1 and event.delta > 0:  # Going from 1 BC to AD
+                new_value = 1  # Skip year 0, go to 1 AD
+        
         # Get the scale widget's min/max values
         if var == self.current_age:
             scale = self.age_scale
@@ -1505,18 +1546,32 @@ class TimelineEditor(ttk.Frame):
         offset = self.config_data.get("day_week_offset", 0)
         
         # Calculate cumulative days from start of timeline
-        age_offset = age - 1
-        year_offset = year - 1 if year > 0 else year  # Handle BC years
+        if self.config_data.get("bc_ad_enabled", False):
+            # For BC/AD, account for skipping year 0
+            if year > 0:
+                # AD years: subtract 1 from year to account for no year 0
+                adjusted_year = year - 1
+                cumulative_days = (adjusted_year * months_per_year * days_per_month + 
+                                  (month - 1) * days_per_month + (day_of_month - 1))
+            else:
+                # BC years: use year directly (already negative)
+                cumulative_days = (year * months_per_year * days_per_month + 
+                                  (month - 1) * days_per_month + (day_of_month - 1))
+        else:
+            # For ages system, calculate as before
+            age_offset = age - 1
+            year_offset = year - 1 if year > 0 else year  # Handle BC years
+            
+            # Calculate cumulative years from all previous ages
+            cumulative_years_from_ages = 0
+            for prev_age in range(1, age):
+                years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+                cumulative_years_from_ages += years_in_prev_age
+            
+            cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                              year_offset * months_per_year * days_per_month + 
+                              (month - 1) * days_per_month + (day_of_month - 1))
         
-        # Calculate cumulative years from all previous ages
-        cumulative_years_from_ages = 0
-        for prev_age in range(1, age):
-            years_in_prev_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
-            cumulative_years_from_ages += years_in_prev_age
-        
-        cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
-                          year_offset * months_per_year * days_per_month + 
-                          (month - 1) * days_per_month + (day_of_month - 1))
         day_of_week = ((cumulative_days + offset) % days_per_week) + 1
         self.current_day_of_week.set(day_of_week)
         
@@ -1870,6 +1925,9 @@ class TimelineEditor(ttk.Frame):
                 
                 dialog = TimelineEventDialog(self, current_time, event)
                 if dialog.result:
+                    # Preserve existing sub-events when updating main event
+                    existing_sub_events = event.get("sub_events", [])
+                    dialog.result["sub_events"] = existing_sub_events
                     self.config_data["events"][event_index] = dialog.result
                     self._populate_events()
         
@@ -2692,11 +2750,16 @@ class CSVGrid(ttk.Frame):
         if not content.strip():
             return []
         
-        lines = content.strip().split('\n')
-        parsed_data = []
-        for line in lines:
-            cells = [cell.strip() for cell in line.split(',')]
-            parsed_data.append(cells)
+        import csv
+        from io import StringIO
+        
+        try:
+            reader = csv.reader(StringIO(content))
+            parsed_data = [row for row in reader]
+        except:
+            # Fallback to simple split if CSV parsing fails
+            lines = content.strip().split('\n')
+            parsed_data = [line.split(',') for line in lines]
             
         if parsed_data:
             header_len = len(parsed_data[0])
@@ -2720,13 +2783,24 @@ class CSVGrid(ttk.Frame):
         self.tree = ttk.Treeview(tree_frame, columns=self.header, show='headings')
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
+        # Configure treeview to show grid lines
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=25, relief="solid", borderwidth=1)
+        style.configure("Treeview.Heading", relief="solid", borderwidth=1)
+        
         for col in self.header:
-            self.tree.column(col, anchor="w", width=100)
+            self.tree.column(col, anchor="w", width=100, minwidth=50)
             self.tree.heading(col, text=col)
             
         for i, row in enumerate(self.rows):
             row_to_insert = row[:len(self.header)] if len(row) > len(self.header) else row + [""] * (len(self.header) - len(row))
-            self.tree.insert('', 'end', values=row_to_insert, tags=(str(i),)) 
+            # Alternate row colors for better grid visibility
+            tag = "evenrow" if i % 2 == 0 else "oddrow"
+            self.tree.insert('', 'end', values=row_to_insert, tags=(tag,))
+            
+        # Configure alternating row colors with borders
+        self.tree.tag_configure("evenrow", background="#f8f8f8")
+        self.tree.tag_configure("oddrow", background="white") 
 
         vscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vscroll.set)
@@ -2737,6 +2811,19 @@ class CSVGrid(ttk.Frame):
         hscroll.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.tree.bind('<Double-1>', self._on_double_click)
+        self.tree.bind('<Delete>', self._on_delete_key)
+        self.tree.bind('<Button-3>', self._on_right_click)
+        self.tree.bind('<Tab>', self._on_tab_key)
+        self.tree.bind('<Return>', self._on_enter_key)
+
+    def _on_right_click(self, event):
+        region = self.tree.identify("region", event.x, event.y)
+        
+        if region == "heading":
+            column_id = self.tree.identify_column(event.x)
+            col_index = int(column_id.replace('#', '')) - 1
+            if 0 <= col_index < len(self.header):
+                self._show_column_menu(event, col_index)
 
     def _on_double_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -2745,7 +2832,7 @@ class CSVGrid(ttk.Frame):
             column_id = self.tree.identify_column(event.x)
             col_index = int(column_id.replace('#', '')) - 1
             if 0 <= col_index < len(self.header):
-                self._edit_header(col_index)
+                self._rename_column(col_index)
             return
         
         if region != "cell": return
@@ -2775,7 +2862,88 @@ class CSVGrid(ttk.Frame):
             self.cell_editor.focus_set()
 
             self.cell_editor.bind("<Return>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
-            self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get())) 
+            self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
+            self.cell_editor.bind("<Tab>", lambda e: self._move_to_next_cell()) 
+
+    def _save_edit_and_focus_tree(self, item_id, col_index, new_value):
+        self._save_edit(item_id, col_index, new_value)
+        # Force focus back to tree immediately
+        self.tree.focus_force()
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        return 'break'
+
+    def _on_enter_key(self, event):
+        selection = self.tree.selection()
+        if selection:
+            self._edit_cell(selection[0], 0)
+        return 'break'
+
+    def _on_tab_key(self, event):
+        selection = self.tree.selection()
+        if selection:
+            self._move_to_next_cell()
+        return 'break'
+
+    def _move_to_next_cell(self):
+        if self.cell_editor and self.cell_editor.winfo_exists():
+            # Get current position from the editor's bindings
+            current_item = None
+            current_col = 0
+            
+            # Find current position by checking editor placement
+            for item in self.tree.get_children():
+                for col in range(len(self.header)):
+                    column_id = f"#{col + 1}"
+                    bbox = self.tree.bbox(item, column_id)
+                    if bbox and self.cell_editor.winfo_x() == bbox[0] and self.cell_editor.winfo_y() == bbox[1]:
+                        current_item = item
+                        current_col = col
+                        break
+                if current_item:
+                    break
+            
+            # Save current edit first
+            self.cell_editor.event_generate('<FocusOut>')
+            
+            if current_item:
+                # Move to next column
+                if current_col + 1 < len(self.header):
+                    # Next column in same row
+                    self._edit_cell(current_item, current_col + 1)
+                else:
+                    # Wrap to first column of next row
+                    items = self.tree.get_children()
+                    current_index = items.index(current_item)
+                    if current_index + 1 < len(items):
+                        next_item = items[current_index + 1]
+                        self._edit_cell(next_item, 0)
+                    else:
+                        # Wrap to first row, first column
+                        if items:
+                            self._edit_cell(items[0], 0)
+
+    def _edit_cell(self, item_id, col_index):
+        if col_index >= len(self.header):
+            return
+            
+        current_values = list(self.tree.item(item_id, 'values'))
+        current_value = current_values[col_index] if col_index < len(current_values) else ""
+        
+        column_id = f"#{col_index + 1}"
+        bbox = self.tree.bbox(item_id, column_id)
+        if bbox:
+            x, y, width, height = bbox
+            
+            entry_var = tk.StringVar(value=current_value)
+            self.cell_editor = ttk.Entry(self.tree, textvariable=entry_var)
+            self.cell_editor.place(x=x, y=y, width=width, height=height)
+            self.cell_editor.focus_set()
+            self.cell_editor.select_range(0, tk.END)
+
+            self.cell_editor.bind("<Return>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
+            self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
+            self.cell_editor.bind("<Tab>", lambda e: self._move_to_next_cell())
 
     def _save_edit(self, item_id, col_index, new_value):
         if not self.cell_editor: return
@@ -2791,8 +2959,27 @@ class CSVGrid(ttk.Frame):
             if self.cell_editor and self.cell_editor.winfo_exists():
                 self.cell_editor.destroy()
             self.cell_editor = None
+            # Always return focus to tree after editing
+            self.tree.focus_force()
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+
+    def _show_column_menu(self, event, col_index):
+        # Create context menu
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Rename Column", command=lambda: self._rename_column(col_index))
+        menu.add_command(label="Delete Column", command=lambda: self._delete_column(col_index))
+        
+        # Show menu at mouse position
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _edit_header(self, col_index):
+        old_name = self.header[col_index]
+
+    def _rename_column(self, col_index):
         old_name = self.header[col_index]
         new_name = simpledialog.askstring("Rename Column", f"Enter new name for column '{old_name}':", parent=self)
         
@@ -2813,7 +3000,6 @@ class CSVGrid(ttk.Frame):
         self.header[col_index] = new_name_stripped
         updated_content = self.get_content()
         
-        # When changing a header, we immediately update the VFS *content* but not the disk.
         if self.controller and self.controller.active_file_path:
             if self.controller._set_file_content(self.controller.active_file_path, updated_content):
                 self._load_data_and_ui(updated_content)
@@ -2822,10 +3008,54 @@ class CSVGrid(ttk.Frame):
         else:
              messagebox.showerror("Internal Error", "Cannot rename column: Controller reference or active path is missing.")
 
+    def _delete_column(self, col_index):
+        if len(self.header) <= 1:
+            messagebox.showerror("Error", "Cannot delete the last column.")
+            return
+            
+        col_name = self.header[col_index]
+        if not messagebox.askyesno("Confirm Delete", f"Delete column '{col_name}'?"):
+            return
+            
+        # Remove column from header and all rows
+        new_header = [h for i, h in enumerate(self.header) if i != col_index]
+        new_rows = []
+        for row in self.rows:
+            new_row = [cell for i, cell in enumerate(row) if i != col_index]
+            new_rows.append(new_row)
+            
+        full_data = [new_header] + new_rows
+        updated_content = self._list_to_csv(full_data)
+        
+        if self.controller and self.controller.active_file_path:
+            if self.controller._set_file_content(self.controller.active_file_path, updated_content):
+                self._load_data_and_ui(updated_content)
+
+    def _on_delete_key(self, event):
+        selection = self.tree.selection()
+        if not selection:
+            return
+            
+        if not messagebox.askyesno("Confirm Delete", "Delete selected row?"):
+            return
+            
+        # Get row index and remove from data
+        item = selection[0]
+        row_index = self.tree.index(item)
+        
+        if row_index < len(self.rows):
+            del self.rows[row_index]
+            full_data = [self.header] + self.rows
+            updated_content = self._list_to_csv(full_data)
+            self._load_data_and_ui(updated_content)
+
 
     def _add_row(self):
         new_row = [""] * len(self.header)
-        self.tree.insert('', 'end', values=new_row)
+        # Add to data and refresh display
+        current_content = self.get_content()
+        updated_content = current_content + "\n" + ",".join(new_row)
+        self._load_data_and_ui(updated_content)
         
 
 
