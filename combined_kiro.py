@@ -532,8 +532,6 @@ class WorldBuilderArchive(tk.Tk):
         self.right_frame = ttk.Frame(self.main_pane, padding="5 5 5 5")
         self.main_pane.add(self.right_frame, weight=70) 
         
-        self.editor_label = ttk.Label(self.right_frame, text="Select a file from the left panel to open it for editing.", anchor='center')
-        self.editor_label.pack(pady=20)
         self.active_editor = None
 
     def _populate_vfs_tree(self):
@@ -700,8 +698,6 @@ class WorldBuilderArchive(tk.Tk):
             widget.destroy()
             
         self.active_editor = None
-        self.editor_label = ttk.Label(self.right_frame, text="Select a file from the left panel to open it for editing.", anchor='center')
-        self.editor_label.pack(pady=20)
 
     def _open_file_editor(self, path_list):
         """Initializes the correct editor widget (Text, CSV, or Timeline) for the new file."""
@@ -828,13 +824,65 @@ class TextEditor(ttk.Frame):
         super().__init__(master)
         self.controller = controller 
         
-        self.text_widget = tk.Text(self, wrap=tk.WORD, font=('Courier New', 10))
+        # Find bar (initially hidden)
+        self.find_frame = ttk.Frame(self)
+        ttk.Label(self.find_frame, text="Find:").pack(side=tk.LEFT, padx=5)
+        self.find_var = tk.StringVar()
+        self.find_var.trace_add('write', lambda *args: self._do_find())
+        self.find_entry = ttk.Entry(self.find_frame, textvariable=self.find_var, width=30)
+        self.find_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(self.find_frame, text="✕", width=3, command=self._hide_find).pack(side=tk.LEFT)
+        
+        self.text_widget = tk.Text(self, wrap=tk.WORD, font=('Courier New', 10), undo=True)
         self.text_widget.insert(tk.END, initial_content)
+        self.text_widget.edit_reset()  # Reset undo stack after initial content
         self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, pady=2)
+        
+        # Bind common text editor shortcuts
+        self.text_widget.bind('<Control-z>', lambda e: self.text_widget.edit_undo())
+        self.text_widget.bind('<Control-y>', lambda e: self.text_widget.edit_redo())
+        self.text_widget.bind('<Control-a>', lambda e: self.text_widget.tag_add(tk.SEL, "1.0", tk.END))
+        self.text_widget.bind('<Control-f>', lambda e: self._show_find())
+        self.text_widget.bind('<Escape>', lambda e: self._hide_find())
             
         scrollbar = ttk.Scrollbar(self, command=self.text_widget.yview)
         self.text_widget.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+    def _show_find(self):
+        """Show find bar at top."""
+        self.find_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5), before=self.text_widget)
+        self.find_entry.focus_set()
+        self.find_entry.select_range(0, tk.END)
+        
+    def _hide_find(self):
+        """Hide find bar and clear highlights."""
+        self.find_frame.pack_forget()
+        self.text_widget.tag_remove("search", "1.0", tk.END)
+        self.text_widget.focus_set()
+        
+    def _do_find(self):
+        """Perform find and highlight matches."""
+        search_term = self.find_var.get()
+        # Clear previous highlights
+        self.text_widget.tag_remove("search", "1.0", tk.END)
+        
+        if search_term:
+            # Find and highlight all occurrences
+            start = "1.0"
+            while True:
+                pos = self.text_widget.search(search_term, start, tk.END)
+                if not pos:
+                    break
+                end = f"{pos}+{len(search_term)}c"
+                self.text_widget.tag_add("search", pos, end)
+                start = end
+            # Configure highlight style
+            self.text_widget.tag_config("search", background="yellow")
+            # Move cursor to first occurrence
+            first_pos = self.text_widget.search(search_term, "1.0", tk.END)
+            if first_pos:
+                self.text_widget.see(first_pos)
         
     def get_content(self):
         """Retrieves and returns the full content of the text widget."""
@@ -1106,7 +1154,7 @@ class TimelineEditor(ttk.Frame):
         legend_frame = ttk.Frame(events_frame)
         legend_frame.pack(fill=tk.X, pady=(0, 5))
         
-        legend_text = "Hotkeys: Enter=Edit Event | Shift+Enter=New Event | Ctrl+Enter=New Sub-Event | Del=Delete Event"
+        legend_text = "Hotkeys: Enter=Edit Event | Shift+Enter=New Event | Ctrl+Enter=New Sub-Event | Del=Delete Event | Right-Click=Go to Event Date"
         ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
         
         # Event management buttons
@@ -1140,6 +1188,7 @@ class TimelineEditor(ttk.Frame):
         self.events_tree.bind('<Shift-Return>', self._hotkey_add_event)
         self.events_tree.bind('<Control-Return>', self._hotkey_add_sub_event)
         self.events_tree.bind('<Delete>', self._hotkey_delete_event)
+        self.events_tree.bind('<Button-3>', self._on_event_click)
         
         # Explicitly bind arrow keys to ensure navigation works
         self.events_tree.bind('<Up>', self._navigate_up)
@@ -1426,25 +1475,38 @@ class TimelineEditor(ttk.Frame):
         """Set timeline position from cumulative days."""
         days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
         months_per_year = self.config_data["time_units"]["months"]["count"]
+        days_per_year = months_per_year * days_per_month
         
         remaining_days = cumulative_days
         
-        # Find the age
-        age = 1
-        ages_count = self.config_data["time_units"]["ages"]["count"]
-        for current_age in range(1, ages_count + 1):
-            years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
-            days_in_age = years_in_age * months_per_year * days_per_month
+        if self.config_data.get("bc_ad_enabled", False):
+            # BC/AD system
+            if remaining_days < 0:
+                # BC years
+                year = remaining_days // days_per_year
+                remaining_days = remaining_days % days_per_year
+            else:
+                # AD years (add 1 to account for no year 0)
+                year = (remaining_days // days_per_year) + 1
+                remaining_days = remaining_days % days_per_year
             
-            if remaining_days < days_in_age:
-                age = current_age
-                break
-            remaining_days -= days_in_age
-        
-        # Find year within age
-        days_per_year = months_per_year * days_per_month
-        year = (remaining_days // days_per_year) + 1
-        remaining_days = remaining_days % days_per_year
+            age = 1  # Not used in BC/AD mode
+        else:
+            # Ages system - find the age
+            age = 1
+            ages_count = self.config_data["time_units"]["ages"]["count"]
+            for current_age in range(1, ages_count + 1):
+                years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+                days_in_age = years_in_age * days_per_year
+                
+                if remaining_days < days_in_age:
+                    age = current_age
+                    break
+                remaining_days -= days_in_age
+            
+            # Find year within age
+            year = (remaining_days // days_per_year) + 1
+            remaining_days = remaining_days % days_per_year
         
         # Find month within year
         month = (remaining_days // days_per_month) + 1
@@ -1464,6 +1526,14 @@ class TimelineEditor(ttk.Frame):
         self._updating_from_master = True
         cumulative_days = int(self.master_timeline_var.get())
         self._set_from_cumulative_days(cumulative_days)
+        
+        # Update year range for the new age
+        visible_units = self.config_data.get("visible_units", {})
+        if visible_units.get("ages", True) and not self.config_data.get("bc_ad_enabled", False):
+            current_age = int(self.current_age.get())
+            years_in_current_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+            self.year_scale.config(from_=1, to=years_in_current_age)
+        
         self._update_day_of_month()
         self._updating_from_master = False
 
@@ -1492,6 +1562,8 @@ class TimelineEditor(ttk.Frame):
             if self.current_year.get() > years_in_current_age:
                 self.current_year.set(1)
         
+        # Update master timeline range since age configuration affects total timeline
+        self._update_master_timeline_range()
         self._update_day_of_month()
 
     def _scroll_scale(self, event, var):
@@ -1635,6 +1707,7 @@ class TimelineEditor(ttk.Frame):
             self.ad_var.set(self.config_data.get("ad_label", "AD"))
             self._toggle_bc_ad()
             self._update_ranges()
+            self._update_master_timeline_range()
             self._update_navigator_visibility()
             self._update_display()
             self._populate_events()
@@ -1750,6 +1823,37 @@ class TimelineEditor(ttk.Frame):
         
         # Highlight matching events
         self._highlight_matching_events()
+
+    def _on_event_click(self, event):
+        """Move scrubbers to match the clicked event's start date."""
+        selection = self.events_tree.selection()
+        if not selection:
+            return
+        
+        item_id = selection[0]
+        
+        # Check if this is a sub-event
+        if "_" in item_id:
+            # Sub-event format: "main_index_sub_index"
+            main_index, sub_index = map(int, item_id.split("_"))
+            if (main_index < len(self.config_data["events"]) and 
+                sub_index < len(self.config_data["events"][main_index].get("sub_events", []))):
+                start_time = self.config_data["events"][main_index]["sub_events"][sub_index].get("start_time", {})
+        else:
+            # Main event
+            event_index = int(item_id) if item_id.isdigit() else None
+            if event_index is not None and event_index < len(self.config_data["events"]):
+                start_time = self.config_data["events"][event_index].get("start_time", {})
+            else:
+                return
+        
+        # Move scrubbers to the event's start time
+        if start_time:
+            self.current_age.set(start_time.get("age", 1))
+            self.current_year.set(start_time.get("year", 1))
+            self.current_month.set(start_time.get("month", 1))
+            self.current_day_of_month.set(start_time.get("day_of_month", 1))
+            self._update_age_change()  # This will update year range and other calculations
 
     def _navigate_up(self, event):
         """Handle up arrow key navigation."""
@@ -2777,6 +2881,13 @@ class CSVGrid(ttk.Frame):
         ttk.Button(button_frame, text="Add Row", command=self._add_row).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="Add Column", command=self._add_column).pack(side=tk.LEFT, padx=2)
         
+        # Hotkey legend
+        legend_frame = ttk.Frame(self.grid_container)
+        legend_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        legend_text = "Hotkeys: Double-Click=Edit Cell | Del=Delete Row | Right-Click=Context Menu"
+        ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
+        
         tree_frame = ttk.Frame(self.grid_container)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -2824,6 +2935,10 @@ class CSVGrid(ttk.Frame):
             col_index = int(column_id.replace('#', '')) - 1
             if 0 <= col_index < len(self.header):
                 self._show_column_menu(event, col_index)
+        elif region == "cell":
+            item_id = self.tree.identify_row(event.y)
+            if item_id:
+                self._show_row_menu(event, item_id)
 
     def _on_double_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -2963,6 +3078,30 @@ class CSVGrid(ttk.Frame):
             self.tree.focus_force()
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
+
+    def _show_row_menu(self, event, item_id):
+        """Show context menu for row operations."""
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Delete Row", command=lambda: self._delete_row(item_id))
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _delete_row(self, item_id):
+        """Delete the specified row."""
+        if not messagebox.askyesno("Confirm Delete", "Delete selected row?"):
+            return
+            
+        # Get row index and remove from data
+        row_index = self.tree.index(item_id)
+        
+        if row_index < len(self.rows):
+            del self.rows[row_index]
+            full_data = [self.header] + self.rows
+            updated_content = self._list_to_csv(full_data)
+            self._load_data_and_ui(updated_content)
 
     def _show_column_menu(self, event, col_index):
         # Create context menu
