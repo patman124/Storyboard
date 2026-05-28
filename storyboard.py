@@ -697,7 +697,7 @@ class WorldBuilderArchive(tk.Tk):
         self.vfs_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.vfs_tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         self.vfs_tree.bind('<Double-1>', self._on_tree_double_click)
-        self.vfs_tree.bind('<Button-3>', self._on_tree_right_click)
+        self.vfs_tree.bind('<ButtonRelease-3>', self._on_tree_right_click)
         
         # Drag-and-drop reordering
         self._drag_item = None
@@ -854,8 +854,8 @@ class WorldBuilderArchive(tk.Tk):
         if node.get("type") == "dir":
             menu.add_command(label="New Folder", command=lambda: self._ctx_create_folder(path_list))
             menu.add_command(label="New File", command=lambda: self._ctx_create_file(path_list))
-            menu.add_separator()
             if not is_root:
+                menu.add_separator()
                 menu.add_command(label="Rename", command=lambda: self._rename_node(path_list))
                 menu.add_command(label="Duplicate", command=lambda: self._copy_node(path_list))
                 menu.add_separator()
@@ -868,7 +868,7 @@ class WorldBuilderArchive(tk.Tk):
             menu.add_separator()
             menu.add_command(label="Delete", command=lambda: self._delete_node(path_list))
 
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _ctx_create_folder(self, parent_path):
         """Context menu action: create folder inside the given path."""
@@ -1247,7 +1247,7 @@ class WorldBuilderArchive(tk.Tk):
             btn = ttk.Button(self._tab_bar, text=file_name,
                            command=lambda p=list(tab_path): self._switch_to_tab(p))
             btn.pack(side=tk.LEFT, padx=1)
-            btn.bind('<Button-3>', lambda e, p=list(tab_path): self._tab_right_click(e, p))
+            btn.bind('<ButtonRelease-3>', lambda e, p=list(tab_path): self._tab_right_click(e, p))
             btn.bind('<ButtonPress-1>', lambda e, p=path_string: self._tab_drag_start(e, p))
             btn.bind('<B1-Motion>', self._tab_drag_motion)
             btn.bind('<ButtonRelease-1>', self._tab_drag_drop)
@@ -1454,7 +1454,7 @@ class WorldBuilderArchive(tk.Tk):
         menu.add_separator()
         menu.add_command(label="Close", command=lambda: self._close_tab(path_list))
         menu.add_command(label="Close Others", command=lambda: self._close_other_tabs(path_list))
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _pop_out_tab(self, path_list):
         """Open a file in a separate pop-out window."""
@@ -1707,6 +1707,10 @@ class SettingsDialog(tk.Toplevel):
 
 # --- Link Utilities ---
 
+def popup_menu(menu, x, y):
+    """Post a context menu."""
+    menu.tk_popup(x, y)
+
 LINK_REGEX = re.compile(r'\[\[([^\]|]+)(?:\|([^\]]+))?\]\]')
 
 def parse_links(text):
@@ -1777,13 +1781,26 @@ class TextEditor(ttk.Frame):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill=tk.X, pady=(0, 2))
         
-        ttk.Button(toolbar, text="B", width=3, command=lambda: self._toggle_format('bold')).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="I", width=3, command=lambda: self._toggle_format('italic')).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="U", width=3, command=lambda: self._toggle_format('underline')).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="S", width=3, command=lambda: self._toggle_format('strikethrough')).pack(side=tk.LEFT, padx=1)
+        self._format_buttons = {}
+        self._format_buttons['bold'] = ttk.Button(toolbar, text="B", width=3, command=lambda: (self._toggle_format('bold'), self.text_widget.focus_set()))
+        self._format_buttons['bold'].pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(self._format_buttons['bold'], "Bold (Ctrl+B)")
+        self._format_buttons['italic'] = ttk.Button(toolbar, text="I", width=3, command=lambda: (self._toggle_format('italic'), self.text_widget.focus_set()))
+        self._format_buttons['italic'].pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(self._format_buttons['italic'], "Italic (Ctrl+I)")
+        self._format_buttons['underline'] = ttk.Button(toolbar, text="U", width=3, command=lambda: (self._toggle_format('underline'), self.text_widget.focus_set()))
+        self._format_buttons['underline'].pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(self._format_buttons['underline'], "Underline (Ctrl+U)")
+        s_btn = ttk.Button(toolbar, text="S", width=3, command=lambda: (self._toggle_format('strikethrough'), self.text_widget.focus_set()))
+        s_btn.pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(s_btn, "Strikethrough")
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
-        ttk.Button(toolbar, text="• List", width=6, command=self._toggle_bullet).pack(side=tk.LEFT, padx=1)
-        ttk.Button(toolbar, text="1. List", width=6, command=self._toggle_numbered).pack(side=tk.LEFT, padx=1)
+        b_btn = ttk.Button(toolbar, text="• List", width=6, command=lambda: (self._toggle_bullet(), self.text_widget.focus_set()))
+        b_btn.pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(b_btn, "Bullet List")
+        n_btn = ttk.Button(toolbar, text="1. List", width=6, command=lambda: (self._toggle_numbered(), self.text_widget.focus_set()))
+        n_btn.pack(side=tk.LEFT, padx=1)
+        self._add_tooltip(n_btn, "Numbered List")
         
         # Find bar (initially hidden)
         self.find_frame = ttk.Frame(self)
@@ -1797,6 +1814,9 @@ class TextEditor(ttk.Frame):
         self.text_widget = tk.Text(self, wrap=tk.WORD, font=('Courier New', 10), undo=True)
         self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, pady=2)
         
+        # Active format state for typing without selection
+        self._active_formats = set()
+
         # Configure format tags
         self.text_widget.tag_configure('bold', font=('Courier New', 10, 'bold'))
         self.text_widget.tag_configure('italic', font=('Courier New', 10, 'italic'))
@@ -1815,47 +1835,233 @@ class TextEditor(ttk.Frame):
         self.text_widget.edit_reset()
         
         # Keyboard shortcuts
-        self.text_widget.bind('<Control-b>', lambda e: (self._toggle_format('bold'), 'break'))
-        self.text_widget.bind('<Control-i>', lambda e: (self._toggle_format('italic'), 'break'))
-        self.text_widget.bind('<Control-u>', lambda e: (self._toggle_format('underline'), 'break'))
+        self.text_widget.bind('<Control-b>', lambda e: self._toggle_format_key('bold'))
+        self.text_widget.bind('<Control-i>', lambda e: self._toggle_format_key('italic'))
+        self.text_widget.bind('<Control-u>', lambda e: self._toggle_format_key('underline'))
         self.text_widget.bind('<Control-z>', lambda e: self.text_widget.edit_undo())
         self.text_widget.bind('<Control-y>', lambda e: self.text_widget.edit_redo())
         self.text_widget.bind('<Control-a>', lambda e: self.text_widget.tag_add(tk.SEL, "1.0", tk.END))
         self.text_widget.bind('<Control-f>', lambda e: self._show_find())
         self.text_widget.bind('<Escape>', lambda e: self._hide_find())
-        self.text_widget.bind('<Button-3>', self._text_right_click)
+        self.text_widget.bind('<Control-o>', lambda e: 'break')
+        self.text_widget.bind('<Control-t>', lambda e: 'break')
+        self.text_widget.bind('<Control-k>', lambda e: 'break')
+        self.text_widget.bind('<Control-d>', lambda e: 'break')
+        self.text_widget.bind('<ButtonRelease-3>', self._text_right_click)
+        self.text_widget.bind('<Return>', self._on_enter)
+        self.text_widget.bind('<KeyPress>', self._on_keypress)
+        self.text_widget.bind('<Button-1>', self._on_click)
+        self.text_widget.bind('<Tab>', self._on_tab)
+        self.text_widget.bind('<BackSpace>', self._on_backspace)
             
         scrollbar = ttk.Scrollbar(self, command=self.text_widget.yview)
         self.text_widget.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _renumber_line(self, line_num):
+        """Recalculate and update the number on a numbered list line based on same-indent lines above."""
+        line_text = self.text_widget.get(f"{line_num}.0", f"{line_num}.end")
+        m = re.match(r'^(\t*)(\d+)\. ', line_text)
+        if not m:
+            return
+        indent = m.group(1)
+        indent_len = len(indent)
+        # Count preceding same-indent numbered lines, skipping deeper-indented lines
+        count = 1
+        for prev in range(line_num - 1, 0, -1):
+            prev_text = self.text_widget.get(f"{prev}.0", f"{prev}.end")
+            pm = re.match(r'^(\t*)(\d+)\. ', prev_text)
+            if pm:
+                prev_indent_len = len(pm.group(1))
+                if prev_indent_len == indent_len:
+                    count += 1
+                elif prev_indent_len < indent_len:
+                    break  # hit a shallower level, stop
+                # deeper indent: skip and keep looking
+            else:
+                # non-numbered line — stop unless it's blank or a bullet (which breaks the sequence)
+                if prev_text.strip() == '' or re.match(r'^\s*• ', prev_text):
+                    break
+                break
+        old_num = m.group(2)
+        if str(count) != old_num:
+            self.text_widget.delete(f"{line_num}.{indent_len}", f"{line_num}.{indent_len+len(old_num)}")
+            self.text_widget.insert(f"{line_num}.{indent_len}", str(count))
+
+    def _on_tab(self, event):
+        """Indent bullet or numbered list line with Tab, or insert normal tab otherwise."""
+        line = self.text_widget.get("insert linestart", "insert lineend")
+        if re.match(r'^(\s*)(• |\d+\. )', line):
+            self.text_widget.insert("insert linestart", "\t")
+            if re.match(r'^(\s*)\d+\. ', line):
+                line_num = int(self.text_widget.index("insert").split('.')[0])
+                self._renumber_line(line_num)
+            return 'break'
+
+    def _on_backspace(self, event):
+        """Outdent indented bullet/numbered list when backspacing the space after the prefix."""
+        line_start = self.text_widget.index("insert linestart")
+        cursor = self.text_widget.index("insert")
+        m = re.match(r'^(\t+)(• |\d+\. )$', self.text_widget.get(line_start, cursor))
+        if m:
+            self.text_widget.delete(line_start, f"{line_start}+1c")
+            if re.match(r'^\d+\. ', m.group(2)):
+                line_num = int(self.text_widget.index("insert").split('.')[0])
+                self._renumber_line(line_num)
+            return 'break'
+
+    def _on_shift_tab(self, event):
+        """Outdent bullet point line with Shift-Tab."""
+        line = self.text_widget.get("insert linestart", "insert lineend")
+        m = re.match(r'^(  )(\s*• )', line)
+        if m:
+            self.text_widget.delete("insert linestart", "insert linestart+2c")
+            return 'break'
+
+    def _on_click(self, event):
+        """Update active format state to match the format at the clicked position."""
+        def update():
+            idx = self.text_widget.index('insert-1c')
+            tags = self.text_widget.tag_names(idx)
+            self._active_formats = {t for t in ('bold', 'italic', 'underline') if t in tags}
+            self._update_toolbar_state()
+        self.text_widget.after(1, update)
+
+    def _on_enter(self, event):
+        """Continue bullet or numbered list prefix on new line, or remove prefix if line is empty."""
+        line_start = self.text_widget.index("insert linestart")
+        line_text = self.text_widget.get(line_start, "insert lineend")
+
+        bullet_match = re.match(r'^(\s*)(• )', line_text)
+        numbered_match = re.match(r'^(\t*)(\d+)\. ', line_text)
+
+        if bullet_match:
+            indent = bullet_match.group(1)
+            # If the line is only the prefix (empty item), remove it and insert plain newline
+            if line_text.strip() == '•':
+                self.text_widget.delete(line_start, f"{line_start} lineend")
+                return 'break'
+            self.text_widget.insert('insert', f'\n{indent}• ')
+            return 'break'
+        elif numbered_match:
+            indent = numbered_match.group(1)
+            num = int(numbered_match.group(2))
+            if line_text.strip() == f"{num}.":
+                self.text_widget.delete(line_start, f"{line_start} lineend")
+                return 'break'
+            self.text_widget.insert('insert', f'\n{indent}1. ')
+            # Now renumber the new line based on same-indent lines above it
+            new_line_num = int(self.text_widget.index("insert").split('.')[0])
+            self._renumber_line(new_line_num)
+            return 'break'
+
+    def _add_tooltip(self, widget, text):
+        """Show a small tooltip label on hover after a short delay."""
+        tip = None
+        after_id = None
+        def show(e):
+            nonlocal tip, after_id
+            def create():
+                nonlocal tip
+                tip = tk.Toplevel(widget)
+                tip.wm_overrideredirect(True)
+                tip.wm_geometry(f"+{e.x_root+10}+{e.y_root+20}")
+                tk.Label(tip, text=text, background="#ffffe0", relief="solid", borderwidth=1,
+                         font=('Helvetica', 8)).pack()
+            after_id = widget.after(800, create)
+        def hide(e):
+            nonlocal tip, after_id
+            if after_id:
+                widget.after_cancel(after_id)
+                after_id = None
+            if tip:
+                tip.destroy()
+                tip = None
+        widget.bind("<Enter>", show)
+        widget.bind("<Leave>", hide)
+
+    def _toggle_format_key(self, tag):
+        """Keyboard shortcut handler — toggles format and returns 'break' to stop default behavior."""
+        self._toggle_format(tag)
+        return 'break'
+
     def _toggle_format(self, tag):
-        """Toggle formatting on the current selection."""
+        """Toggle formatting on selection, or toggle active format state for future typing."""
         try:
             sel_start = self.text_widget.index(tk.SEL_FIRST)
             sel_end = self.text_widget.index(tk.SEL_LAST)
         except tk.TclError:
-            return  # No selection
-        
+            # No selection — toggle active format state (not for strikethrough)
+            if tag == 'strikethrough':
+                return
+            if tag in self._active_formats:
+                self._active_formats.discard(tag)
+            else:
+                self._active_formats.add(tag)
+            self._update_toolbar_state()
+            return
+
         if tag in self.text_widget.tag_names(sel_start):
             self.text_widget.tag_remove(tag, sel_start, sel_end)
             if tag in ('bold', 'italic'):
                 self.text_widget.tag_remove('bold_italic', sel_start, sel_end)
         else:
             self.text_widget.tag_add(tag, sel_start, sel_end)
-            # Add combined tag if both bold and italic are now present
             if tag == 'bold' and 'italic' in self.text_widget.tag_names(sel_start):
                 self.text_widget.tag_add('bold_italic', sel_start, sel_end)
             elif tag == 'italic' and 'bold' in self.text_widget.tag_names(sel_start):
                 self.text_widget.tag_add('bold_italic', sel_start, sel_end)
 
+    def _update_toolbar_state(self):
+        """Update toolbar button appearance to reflect active format state."""
+        for tag, btn in getattr(self, '_format_buttons', {}).items():
+            if tag in self._active_formats:
+                btn.state(['pressed'])
+            else:
+                btn.state(['!pressed'])
+
+    def _on_keypress(self, event):
+        """Apply active formats to typed characters."""
+        if not self._active_formats:
+            return
+        # Only handle printable characters, ignore control key combos
+        if not event.char or event.char in ('\r', '\n') or event.state & 0x4:
+            return
+        # Insert the character manually with active tags applied
+        tags = tuple(self._active_formats)
+        if 'bold' in self._active_formats and 'italic' in self._active_formats:
+            tags = tags + ('bold_italic',)
+        self.text_widget.insert('insert', event.char, tags)
+        return 'break'
+
     def _toggle_bullet(self):
         """Toggle bullet points on selected lines."""
-        self._toggle_line_prefix("• ", None)
+        try:
+            self.text_widget.index(tk.SEL_FIRST)
+            self._toggle_line_prefix("• ", None)
+        except tk.TclError:
+            line = self.text_widget.get("insert linestart", "insert lineend")
+            m_indent = re.match(r'^(\t*)', line)
+            indent = m_indent.group(1)
+            if re.match(r'^\t*• ', line):
+                self.text_widget.delete("insert linestart", f"insert linestart+{len(indent)+2}c")
+            else:
+                self.text_widget.insert(f"insert linestart+{len(indent)}c", "• ")
 
     def _toggle_numbered(self):
         """Toggle numbered list on selected lines."""
-        self._toggle_line_prefix(None, "numbered")
+        try:
+            self.text_widget.index(tk.SEL_FIRST)
+            self._toggle_line_prefix(None, "numbered")
+        except tk.TclError:
+            line = self.text_widget.get("insert linestart", "insert lineend")
+            m_indent = re.match(r'^(\t*)', line)
+            indent = m_indent.group(1)
+            m = re.match(r'^\t*(\d+)\. ', line)
+            if m:
+                self.text_widget.delete("insert linestart", f"insert linestart+{len(indent)+len(m.group(1))+2}c")
+            else:
+                self.text_widget.insert(f"insert linestart+{len(indent)}c", "1. ")
 
     def _toggle_line_prefix(self, prefix, mode):
         """Add or remove line prefixes for lists, preserving formatting tags."""
@@ -2037,9 +2243,21 @@ class TextEditor(ttk.Frame):
 
     def _text_right_click(self, event):
         """Right-click context menu for text editor."""
+        idx = self.text_widget.index(f"@{event.x},{event.y}")
         menu = tk.Menu(self, tearoff=0)
+        if 'link' in self.text_widget.tag_names(idx):
+            menu.add_command(label="Remove Link", command=lambda: self._remove_link(idx))
+            menu.add_separator()
         menu.add_command(label="Insert Link", command=self._insert_link)
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _remove_link(self, idx):
+        """Remove the link tag from the link at idx, keeping the display text."""
+        link_range = self.text_widget.tag_prevrange('link', f"{idx}+1c") or self.text_widget.tag_nextrange('link', idx)
+        if link_range and self.text_widget.compare(link_range[0], '<=', idx) and self.text_widget.compare(link_range[1], '>=', idx):
+            display = self.text_widget.get(link_range[0], link_range[1])
+            self.text_widget.tag_remove('link', link_range[0], link_range[1])
+            self._links.pop(display, None)
 
     def _insert_link(self):
         """Open file picker and insert a link at cursor position."""
@@ -2219,7 +2437,9 @@ class TimelineEditor(ttk.Frame):
                 checkbox.grid(row=i, column=0, padx=5)
                 setattr(self, f"{unit}_checkbox", checkbox)  # Store reference
                 
-                ttk.Label(units_frame, text=f"{unit.replace('_', ' ').title()}:").grid(row=i, column=1, sticky="w", padx=5)
+                lbl = ttk.Label(units_frame, text=f"{unit.replace('_', ' ').title()}:")
+                lbl.grid(row=i, column=1, sticky="w", padx=5)
+                setattr(self, f"{unit}_label", lbl)
                 
                 count_var = tk.IntVar(value=data["count"])
                 setattr(self, f"{unit}_count_var", count_var)
@@ -2239,6 +2459,21 @@ class TimelineEditor(ttk.Frame):
                                    command=lambda u=unit: self._configure_ages())
                     btn.grid(row=i, column=3, padx=5)
                     setattr(self, f"{unit}_name_btn", btn)
+                    # Epochal dating checkbox — hidden until epochal mode is active
+                    epochal_var = tk.BooleanVar(value=self.config_data.get("bc_ad_enabled", False))
+                    self.epochal_visible_var = epochal_var
+                    self.epochal_checkbox = ttk.Checkbutton(units_frame, variable=epochal_var,
+                                                            command=self._on_epochal_checkbox)
+                    self.epochal_checkbox.grid(row=i, column=0, padx=5)
+                    self.epochal_label = ttk.Label(units_frame, text="Epochal Dating:")
+                    self.epochal_label.grid(row=i, column=1, sticky="w", padx=5)
+                    # Show ages or epochal widgets based on current state
+                    if self.config_data.get("bc_ad_enabled", False):
+                        checkbox.grid_remove()
+                        lbl.grid_remove()
+                    else:
+                        self.epochal_checkbox.grid_remove()
+                        self.epochal_label.grid_remove()
                 elif unit != "years":  # Skip creating button for years
                     btn = ttk.Button(units_frame, text=f"Name {unit.replace('_', ' ').title()}", 
                                    command=lambda u=unit: self._configure_names(u))
@@ -2254,41 +2489,22 @@ class TimelineEditor(ttk.Frame):
                                                      textvariable=self.day_week_offset_var, state="disabled")
                     self.offset_spinbox.grid(row=i, column=5, padx=5)
         
-        # Add BC/AD configuration below the time units (only when ages are disabled)
-        bc_ad_frame = ttk.LabelFrame(self.config_frame, text="BC/AD Dating", padding="5")
-        bc_ad_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        # Enable checkbox
+        # BC/AD vars (controlled via Configure Ages dialog only)
         self.bc_ad_var = tk.BooleanVar(value=self.config_data.get("bc_ad_enabled", False))
-        self.bc_ad_checkbox = ttk.Checkbutton(bc_ad_frame, text="Enable BC/AD Dating", 
-                                             variable=self.bc_ad_var, command=self._toggle_bc_ad)
-        self.bc_ad_checkbox.grid(row=0, column=0, columnspan=4, sticky="w", pady=5)
-        
-        # BC Label and Years
-        ttk.Label(bc_ad_frame, text="BC Label:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.bc_var = tk.StringVar(value=self.config_data.get("bc_label", "BC"))
         self.bc_var.trace_add('write', self._update_bc_ad_labels)
-        self.bc_entry = ttk.Entry(bc_ad_frame, width=10, textvariable=self.bc_var)
-        self.bc_entry.grid(row=1, column=1, padx=5, pady=5)
-        
-        ttk.Label(bc_ad_frame, text="BC Years:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
-        self.bc_years_var = tk.IntVar(value=self.config_data.get("bc_years", 100))
-        self.bc_years_var.trace_add('write', self._update_bc_ad_years)
-        self.bc_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.bc_years_var)
-        self.bc_years_spinbox.grid(row=1, column=3, padx=5, pady=5)
-        
-        # AD Label and Years
-        ttk.Label(bc_ad_frame, text="AD Label:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.ad_var = tk.StringVar(value=self.config_data.get("ad_label", "AD"))
         self.ad_var.trace_add('write', self._update_bc_ad_labels)
-        self.ad_entry = ttk.Entry(bc_ad_frame, width=10, textvariable=self.ad_var)
-        self.ad_entry.grid(row=2, column=1, padx=5, pady=5)
-        
-        ttk.Label(bc_ad_frame, text="AD Years:").grid(row=2, column=2, padx=5, pady=5, sticky="w")
+        self.bc_years_var = tk.IntVar(value=self.config_data.get("bc_years", 100))
+        self.bc_years_var.trace_add('write', self._update_bc_ad_years)
         self.ad_years_var = tk.IntVar(value=self.config_data.get("ad_years", 100))
         self.ad_years_var.trace_add('write', self._update_bc_ad_years)
-        self.ad_years_spinbox = ttk.Spinbox(bc_ad_frame, from_=1, to=999999, width=8, textvariable=self.ad_years_var)
-        self.ad_years_spinbox.grid(row=2, column=3, padx=5, pady=5)
+        # Stub widget refs so existing code doesn't break
+        self.bc_ad_checkbox = None
+        self.bc_entry = None
+        self.ad_entry = None
+        self.bc_years_spinbox = None
+        self.ad_years_spinbox = None
 
         # Time Scrubber Section  
         scrubber_frame = ttk.LabelFrame(self, text="Time Navigator", padding="10")
@@ -2397,7 +2613,7 @@ class TimelineEditor(ttk.Frame):
         self.events_tree.bind('<Return>', self._hotkey_edit_event)
         self.events_tree.bind('<Shift-Return>', self._hotkey_add_event)
         self.events_tree.bind('<Delete>', self._hotkey_delete_event)
-        self.events_tree.bind('<Button-3>', self._on_event_right_click)
+        self.events_tree.bind('<ButtonRelease-3>', self._on_event_right_click)
         
         # Explicitly bind arrow keys to ensure navigation works
         self.events_tree.bind('<Up>', self._navigate_up)
@@ -2409,6 +2625,19 @@ class TimelineEditor(ttk.Frame):
 
         # Initialize BC/AD state after all widgets are created
         self._toggle_bc_ad()
+        # Restore epochal label if already configured
+        if self.config_data.get("bc_ad_enabled", False):
+            ages_checkbox = getattr(self, "ages_checkbox", None)
+            ages_label = getattr(self, "ages_label", None)
+            if ages_checkbox: ages_checkbox.grid_remove()
+            if ages_label: ages_label.grid_remove()
+            ec = getattr(self, "epochal_checkbox", None)
+            el = getattr(self, "epochal_label", None)
+            if ec: ec.grid()
+            if el: el.grid()
+            ages_count_spinbox = getattr(self, "ages_count_spinbox", None)
+            ages_name_btn = getattr(self, "ages_name_btn", None)
+            if ages_count_spinbox: ages_count_spinbox.config(state="disabled")
         self._update_navigator_visibility()
         
         # Initialize visibility states for all units
@@ -2499,50 +2728,10 @@ class TimelineEditor(ttk.Frame):
         
         if count_spinbox:
             count_spinbox.config(state=state)
-        if name_btn and unit != "years":  # Don't disable Name Years button
+        if name_btn and unit != "years" and unit != "ages":  # Don't disable Name Years or Configure Ages button
             name_btn.config(state=state)
         
         # Special handling: disable years and BC/AD when ages is enabled
-        if unit == "ages":
-            years_visible_var = getattr(self, "years_visible_var", None)
-            years_count_spinbox = getattr(self, "years_count_spinbox", None)
-            years_checkbox = getattr(self, "years_checkbox", None)
-            
-            # BC/AD controls
-            bc_ad_checkbox = getattr(self, "bc_ad_checkbox", None)
-            bc_entry = getattr(self, "bc_entry", None)
-            ad_entry = getattr(self, "ad_entry", None)
-            bc_years_spinbox = getattr(self, "bc_years_spinbox", None)
-            ad_years_spinbox = getattr(self, "ad_years_spinbox", None)
-            
-            if years_visible_var and years_count_spinbox and years_checkbox:
-                if visible:  # Ages is enabled, disable years and BC/AD
-                    years_visible_var.set(False)
-                    years_count_spinbox.config(state="disabled")
-                    years_checkbox.config(state="disabled")
-                    
-                    # Disable BC/AD controls
-                    if bc_ad_checkbox:
-                        self.bc_ad_var.set(False)
-                        bc_ad_checkbox.config(state="disabled")
-                    if bc_entry:
-                        bc_entry.config(state="disabled")
-                    if ad_entry:
-                        ad_entry.config(state="disabled")
-                    if bc_years_spinbox:
-                        bc_years_spinbox.config(state="disabled")
-                    if ad_years_spinbox:
-                        ad_years_spinbox.config(state="disabled")
-                        
-                else:  # Ages is disabled, allow years and BC/AD to be enabled
-                    years_count_spinbox.config(state="normal")
-                    years_checkbox.config(state="normal")
-                    
-                    # Enable BC/AD controls
-                    if bc_ad_checkbox:
-                        bc_ad_checkbox.config(state="normal")
-                    self._toggle_bc_ad()  # Update BC/AD entry states based on checkbox
-            
         # Special handling for days of week offset
         if unit == "days_of_week" and hasattr(self, 'offset_spinbox'):
             if visible:
@@ -2878,31 +3067,39 @@ class TimelineEditor(ttk.Frame):
         enabled = self.bc_ad_var.get()
         self.config_data["bc_ad_enabled"] = enabled
         
-        if enabled:
-            self.bc_entry.config(state="normal")
-            self.ad_entry.config(state="normal")
-            self.bc_years_spinbox.config(state="normal")
-            self.ad_years_spinbox.config(state="normal")
-        else:
-            self.bc_entry.config(state="disabled")
-            self.ad_entry.config(state="disabled")
-            self.bc_years_spinbox.config(state="disabled")
-            self.ad_years_spinbox.config(state="disabled")
-            # Reset negative years to positive when BC/AD is disabled
-            if self.current_year.get() <= 0:
-                self.current_year.set(1)
+        if not enabled and self.current_year.get() <= 0:
+            self.current_year.set(1)
         
-        # Update labels when changed
         if enabled:
             self.config_data["bc_label"] = self.bc_var.get()
             self.config_data["ad_label"] = self.ad_var.get()
             self.config_data["bc_years"] = self.bc_years_var.get()
             self.config_data["ad_years"] = self.ad_years_var.get()
         
-        # Update year range
         self._update_ranges()
         self._update_display()
-        self._populate_events()  # Refresh events display with new BC/AD formatting
+        self._populate_events()
+
+    def _on_epochal_checkbox(self):
+        """When epochal checkbox is unchecked, disable epochal dating and restore ages checkbox."""
+        if not self.epochal_visible_var.get():
+            self.config_data["bc_ad_enabled"] = False
+            self.bc_ad_var.set(False)
+            ages_checkbox = getattr(self, "ages_checkbox", None)
+            ages_label = getattr(self, "ages_label", None)
+            if ages_checkbox: ages_checkbox.grid()
+            if ages_label: ages_label.grid()
+            ec = getattr(self, "epochal_checkbox", None)
+            el = getattr(self, "epochal_label", None)
+            if ec: ec.grid_remove()
+            if el: el.grid_remove()
+            if self.current_year.get() <= 0:
+                self.current_year.set(1)
+            self._update_ranges()
+            self._update_master_timeline_range()
+            self._update_navigator_visibility()
+            self._update_display()
+            self._populate_events()
 
     def _configure_ages(self):
         """Open dialog to configure ages with BC/AD settings."""
@@ -2911,9 +3108,57 @@ class TimelineEditor(ttk.Frame):
             self.config_data["time_units"]["ages"]["names"] = dialog.result["names"]
             self.config_data["time_units"]["ages"]["years_per_age"] = dialog.result["years_per_age"]
             self.config_data.update(dialog.result["bc_ad_config"])
-            self.bc_ad_var.set(self.config_data.get("bc_ad_enabled", False))
+            epochal = self.config_data.get("bc_ad_enabled", False)
+            self.bc_ad_var.set(epochal)
             self.bc_var.set(self.config_data.get("bc_label", "BC"))
             self.ad_var.set(self.config_data.get("ad_label", "AD"))
+
+            # Update ages checkbox label and state based on dating system chosen
+            ages_checkbox = getattr(self, "ages_checkbox", None)
+            ages_label = getattr(self, "ages_label", None)
+            ages_count_spinbox = getattr(self, "ages_count_spinbox", None)
+            ages_name_btn = getattr(self, "ages_name_btn", None)
+            years_checkbox = getattr(self, "years_checkbox", None)
+            years_count_spinbox = getattr(self, "years_count_spinbox", None)
+
+            if epochal:
+                # Epochal: show epochal checkbox, hide ages checkbox
+                ages_checkbox = getattr(self, "ages_checkbox", None)
+                ages_label = getattr(self, "ages_label", None)
+                if ages_checkbox: ages_checkbox.grid_remove()
+                if ages_label: ages_label.grid_remove()
+                ec = getattr(self, "epochal_checkbox", None)
+                el = getattr(self, "epochal_label", None)
+                if ec: ec.grid()
+                if el: el.grid()
+                ev = getattr(self, "epochal_visible_var", None)
+                if ev: ev.set(True)
+                if ages_count_spinbox:
+                    ages_count_spinbox.config(state="disabled")
+                if ages_name_btn:
+                    ages_name_btn.config(state="normal")
+                self.config_data["visible_units"]["ages"] = False
+                ages_visible_var = getattr(self, "ages_visible_var", None)
+                if ages_visible_var: ages_visible_var.set(False)
+            else:
+                # Ages: show ages checkbox, hide epochal checkbox
+                ages_checkbox = getattr(self, "ages_checkbox", None)
+                ages_label = getattr(self, "ages_label", None)
+                if ages_checkbox: ages_checkbox.grid()
+                if ages_label: ages_label.grid()
+                ec = getattr(self, "epochal_checkbox", None)
+                el = getattr(self, "epochal_label", None)
+                if ec: ec.grid_remove()
+                if el: el.grid_remove()
+                ev = getattr(self, "epochal_visible_var", None)
+                if ev: ev.set(False)
+                if ages_name_btn:
+                    ages_name_btn.config(state="normal")  # always enabled
+                if years_checkbox:
+                    years_checkbox.config(state="disabled" if self.config_data["visible_units"].get("ages") else "normal")
+                if years_count_spinbox:
+                    years_count_spinbox.config(state="disabled" if self.config_data["visible_units"].get("ages") else "normal")
+
             self._toggle_bc_ad()
             self._update_ranges()
             self._update_master_timeline_range()
@@ -3056,7 +3301,7 @@ class TimelineEditor(ttk.Frame):
 
         menu.add_command(label="Edit Event", command=lambda: self._hotkey_edit_event(None))
         menu.add_command(label="Delete Event", command=lambda: self._hotkey_delete_event(None))
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _insert_event_link(self, item_id):
         """Open edit dialog for the event to insert a link in description."""
@@ -3335,8 +3580,8 @@ class TimelineEditor(ttk.Frame):
             start_time_str = self._format_event_time_display(start_time)
             end_time_str = self._format_event_time_display(end_time) if end_time else ""
                 
-            desc_display = LINK_REGEX.sub(lambda m: "🔗 " + (m.group(2) or m.group(1).split('/')[-1]), event.get('description', ''))
-            name_display = LINK_REGEX.sub(lambda m: "🔗 " + (m.group(2) or m.group(1).split('/')[-1]), event['name'])
+            desc_display = LINK_REGEX.sub(lambda m: "⇗ " + (m.group(2) or m.group(1).split('/')[-1]), event.get('description', ''))
+            name_display = LINK_REGEX.sub(lambda m: "⇗ " + (m.group(2) or m.group(1).split('/')[-1]), event['name'])
             main_item = self.events_tree.insert('', 'end', text=name_display, iid=str(original_index),
                                                values=(start_time_str, end_time_str, desc_display[:50]))
             
@@ -3351,9 +3596,9 @@ class TimelineEditor(ttk.Frame):
             sub_start_time_str = self._format_event_time_display(sub_start_time)
             sub_end_time_str = self._format_event_time_display(sub_end_time) if sub_end_time else ""
             
-            sub_desc_display = LINK_REGEX.sub(lambda m: "🔗 " + (m.group(2) or m.group(1).split('/')[-1]), sub_event.get('description', ''))
+            sub_desc_display = LINK_REGEX.sub(lambda m: "⇗ " + (m.group(2) or m.group(1).split('/')[-1]), sub_event.get('description', ''))
             item_id = f"{id_prefix}_{sub_index}"
-            sub_name_display = LINK_REGEX.sub(lambda m: "🔗 " + (m.group(2) or m.group(1).split('/')[-1]), sub_event['name'])
+            sub_name_display = LINK_REGEX.sub(lambda m: "⇗ " + (m.group(2) or m.group(1).split('/')[-1]), sub_event['name'])
             sub_item = self.events_tree.insert(parent_item, 'end', text=sub_name_display, 
                                    iid=item_id,
                                    values=(sub_start_time_str, sub_end_time_str, sub_desc_display[:50]))
@@ -3810,7 +4055,7 @@ class TimelineEventDialog(tk.Toplevel):
         self.name_text = tk.Text(name_frame, width=40, height=1)
         self.name_text.pack(fill=tk.X)
         self.name_text.tag_configure('link', foreground='#1565C0', underline=True)
-        self.name_text.bind('<Button-3>', self._name_right_click)
+        self.name_text.bind('<ButtonRelease-3>', self._name_right_click)
         self._name_links = {}
         if self.existing_event:
             self._load_name_with_links(self.existing_event.get("name", ""))
@@ -3824,7 +4069,7 @@ class TimelineEventDialog(tk.Toplevel):
         self.desc_text.tag_configure('link', foreground='#1565C0', underline=True)
         if self.existing_event:
             self._load_desc_with_links(self.existing_event.get("description", ""))
-        self.desc_text.bind('<Button-3>', self._desc_right_click)
+        self.desc_text.bind('<ButtonRelease-3>', self._desc_right_click)
         
         # Start time controls
         start_frame = ttk.LabelFrame(self, text="Start Time", padding="10")
@@ -3974,9 +4219,29 @@ class TimelineEventDialog(tk.Toplevel):
 
     def _name_right_click(self, event):
         """Right-click on name to insert link."""
+        idx = self.name_text.index(f"@{event.x},{event.y}")
         menu = tk.Menu(self, tearoff=0)
+        if 'link' in self.name_text.tag_names(idx):
+            menu.add_command(label="Remove Link", command=lambda: self._remove_name_link(idx))
+            menu.add_separator()
         menu.add_command(label="Insert Link", command=self._insert_name_link)
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _remove_name_link(self, idx):
+        widget = self.name_text
+        lr = widget.tag_prevrange('link', f"{idx}+1c") or widget.tag_nextrange('link', idx)
+        if lr and widget.compare(lr[0], '<=', idx) and widget.compare(lr[1], '>=', idx):
+            widget.tag_remove('link', lr[0], lr[1])
+            self._name_links.pop(widget.get(lr[0], lr[1]), None)
+
+    def _remove_desc_link(self, idx):
+        widget = self.desc_text
+        lr = widget.tag_prevrange('link', f"{idx}+1c") or widget.tag_nextrange('link', idx)
+        if lr and widget.compare(lr[0], '<=', idx) and widget.compare(lr[1], '>=', idx):
+            widget.tag_remove('link', lr[0], lr[1])
+            if not hasattr(self, '_desc_links'):
+                self._desc_links = {}
+            self._desc_links.pop(widget.get(lr[0], lr[1]), None)
 
     def _insert_name_link(self):
         """Insert a link into the name field."""
@@ -4055,9 +4320,13 @@ class TimelineEventDialog(tk.Toplevel):
 
     def _desc_right_click(self, event):
         """Right-click on description to insert link."""
+        idx = self.desc_text.index(f"@{event.x},{event.y}")
         menu = tk.Menu(self, tearoff=0)
+        if 'link' in self.desc_text.tag_names(idx):
+            menu.add_command(label="Remove Link", command=lambda: self._remove_desc_link(idx))
+            menu.add_separator()
         menu.add_command(label="Insert Link", command=self._insert_desc_link)
-        menu.tk_popup(event.x_root, event.y_root)
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _get_desc_content(self):
         """Get description with links serialized as [[path|display]]."""
@@ -4290,7 +4559,7 @@ class CSVGrid(ttk.Frame):
         m = LINK_REGEX.match(str(value).strip())
         if m:
             display = m.group(2) if m.group(2) else m.group(1).split('/')[-1]
-            return f"🔗 {display}"
+            return f"⇗ {display}"
         return value
 
     def _setup_grid_ui(self):
@@ -4346,7 +4615,7 @@ class CSVGrid(ttk.Frame):
 
         self.tree.bind('<Double-1>', self._on_double_click)
         self.tree.bind('<Delete>', self._on_delete_key)
-        self.tree.bind('<Button-3>', self._on_right_click)
+        self.tree.bind('<ButtonRelease-3>', self._on_right_click)
         self.tree.bind('<Tab>', self._on_tab_key)
         self.tree.bind('<Return>', self._on_enter_key)
         self.tree.bind('<ButtonRelease-1>', self._on_single_click)
@@ -4780,11 +5049,11 @@ class CSVGrid(ttk.Frame):
                 current_values_list[col_index] = new_value
                 self.tree.item(item_id, values=current_values_list)
 
-                # If the cell had a link and the 🔗 was removed, clear link in raw data
+                # If the cell had a link and the ⇗ was removed, clear link in raw data
                 row_index = self.tree.index(item_id)
                 if row_index < len(self.rows) and col_index < len(self.rows[row_index]):
                     raw = self.rows[row_index][col_index]
-                    if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("🔗 "):
+                    if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
                         self.rows[row_index][col_index] = new_value
 
             # Auto-add blank row if last row now has non-checkbox content
@@ -4829,10 +5098,7 @@ class CSVGrid(ttk.Frame):
         menu.add_separator()
         menu.add_command(label="Delete Row", command=lambda: self._delete_row(item_id))
         
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _link_cell(self, item_id, col_index):
         """Set a cell value as a link to a VFS file."""
@@ -4850,7 +5116,7 @@ class CSVGrid(ttk.Frame):
                 display = m.group(2) if m.group(2) else raw_val
             else:
                 display = raw_val.strip() if raw_val.strip() else path.split('/')[-1]
-            current_values[col_index] = f"🔗 {display}"
+            current_values[col_index] = f"⇗ {display}"
             self.tree.item(item_id, values=current_values)
             # Store raw link in rows data
             row_index = self.tree.index(item_id)
@@ -4890,10 +5156,7 @@ class CSVGrid(ttk.Frame):
         menu.add_command(label="Delete Column", command=lambda: self._delete_column(col_index))
         
         # Show menu at mouse position
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        popup_menu(menu, event.x_root, event.y_root)
 
     def _set_column_checkbox(self, col_index):
         """Convert all cells in a column to checkboxes."""
@@ -5071,7 +5334,7 @@ class CSVGrid(ttk.Frame):
                     row.append("TRUE")
                 elif s == "☐":
                     row.append("FALSE")
-                elif s.startswith("🔗 ") and row_idx < len(self.rows) and col_idx < len(self.rows[row_idx]):
+                elif s.startswith("⇗ ") and row_idx < len(self.rows) and col_idx < len(self.rows[row_idx]):
                     # Use raw link data from self.rows
                     row.append(self.rows[row_idx][col_idx])
                 else:
