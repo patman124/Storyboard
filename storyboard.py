@@ -77,7 +77,8 @@ class WorldBuilderArchive(tk.Tk):
     FILE_TYPE_MAP = {
         "Text Document": ".txt",
         "Table (.table)": ".table",
-        "Chronological Timeline": ".timeline"
+        "Chronological Timeline": ".timeline",
+        "Image Viewer": ".image"
     }
 
     def __init__(self):
@@ -1434,6 +1435,8 @@ class WorldBuilderArchive(tk.Tk):
             self.active_editor = CSVGrid(editor_frame, content, name_regex=self.NAME_REGEX, controller=self)
         elif file_name.lower().endswith('.timeline'):
             self.active_editor = TimelineEditor(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.image'):
+            self.active_editor = ImageViewer(editor_frame, content, controller=self)
         else:
             self.active_editor = TextEditor(editor_frame, content, controller=self)
 
@@ -1475,6 +1478,8 @@ class WorldBuilderArchive(tk.Tk):
             editor = CSVGrid(editor_frame, content, name_regex=self.NAME_REGEX, controller=self)
         elif file_name.lower().endswith('.timeline'):
             editor = TimelineEditor(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.image'):
+            editor = ImageViewer(editor_frame, content, controller=self)
         else:
             editor = TextEditor(editor_frame, content, controller=self)
 
@@ -2638,6 +2643,14 @@ class TimelineEditor(ttk.Frame):
             ages_count_spinbox = getattr(self, "ages_count_spinbox", None)
             ages_name_btn = getattr(self, "ages_name_btn", None)
             if ages_count_spinbox: ages_count_spinbox.config(state="disabled")
+            # Force years enabled under epochal dating
+            self.config_data["visible_units"]["years"] = True
+            years_visible_var = getattr(self, "years_visible_var", None)
+            if years_visible_var: years_visible_var.set(True)
+            years_checkbox = getattr(self, "years_checkbox", None)
+            years_count_spinbox = getattr(self, "years_count_spinbox", None)
+            if years_checkbox: years_checkbox.config(state="disabled")
+            if years_count_spinbox: years_count_spinbox.config(state="disabled")
         self._update_navigator_visibility()
         
         # Initialize visibility states for all units
@@ -2731,7 +2744,6 @@ class TimelineEditor(ttk.Frame):
         if name_btn and unit != "years" and unit != "ages":  # Don't disable Name Years or Configure Ages button
             name_btn.config(state=state)
         
-        # Special handling: disable years and BC/AD when ages is enabled
         # Special handling for days of week offset
         if unit == "days_of_week" and hasattr(self, 'offset_spinbox'):
             if visible:
@@ -2775,8 +2787,8 @@ class TimelineEditor(ttk.Frame):
                     widget_pairs.append(("ages", widget, self.age_scale))
                     break
         
-        if hasattr(self, 'year_scale') and (ages_enabled or years_enabled):
-            # Find year label - show when Ages OR Years checkbox is checked
+        if hasattr(self, 'year_scale') and years_enabled:
+            # Find year label - show when Years checkbox is checked
             for widget in self.controls_frame.winfo_children():
                 if isinstance(widget, ttk.Label) and widget.cget("text") == "Year:":
                     widget_pairs.append(("years", widget, self.year_scale))
@@ -3095,6 +3107,15 @@ class TimelineEditor(ttk.Frame):
             if el: el.grid_remove()
             if self.current_year.get() <= 0:
                 self.current_year.set(1)
+            # Re-enable years checkbox now that epochal is off
+            years_checkbox = getattr(self, "years_checkbox", None)
+            years_count_spinbox = getattr(self, "years_count_spinbox", None)
+            if years_checkbox:
+                years_checkbox.config(state="normal")
+            years_visible_var = getattr(self, "years_visible_var", None)
+            years_visible = years_visible_var.get() if years_visible_var else True
+            if years_count_spinbox:
+                years_count_spinbox.config(state="normal" if years_visible else "disabled")
             self._update_ranges()
             self._update_master_timeline_range()
             self._update_navigator_visibility()
@@ -3140,6 +3161,14 @@ class TimelineEditor(ttk.Frame):
                 self.config_data["visible_units"]["ages"] = False
                 ages_visible_var = getattr(self, "ages_visible_var", None)
                 if ages_visible_var: ages_visible_var.set(False)
+                # Force years enabled under epochal dating
+                self.config_data["visible_units"]["years"] = True
+                years_visible_var = getattr(self, "years_visible_var", None)
+                if years_visible_var: years_visible_var.set(True)
+                if years_checkbox:
+                    years_checkbox.config(state="disabled")
+                if years_count_spinbox:
+                    years_count_spinbox.config(state="disabled")
             else:
                 # Ages: show ages checkbox, hide epochal checkbox
                 ages_checkbox = getattr(self, "ages_checkbox", None)
@@ -3154,10 +3183,17 @@ class TimelineEditor(ttk.Frame):
                 if ev: ev.set(False)
                 if ages_name_btn:
                     ages_name_btn.config(state="normal")  # always enabled
+                # Force ages enabled by default
+                self.config_data["visible_units"]["ages"] = True
+                ages_visible_var = getattr(self, "ages_visible_var", None)
+                if ages_visible_var: ages_visible_var.set(True)
+                # Release years checkbox (may have been locked by epochal)
                 if years_checkbox:
-                    years_checkbox.config(state="disabled" if self.config_data["visible_units"].get("ages") else "normal")
+                    years_checkbox.config(state="normal")
+                years_visible_var = getattr(self, "years_visible_var", None)
+                years_visible = years_visible_var.get() if years_visible_var else True
                 if years_count_spinbox:
-                    years_count_spinbox.config(state="disabled" if self.config_data["visible_units"].get("ages") else "normal")
+                    years_count_spinbox.config(state="normal" if years_visible else "disabled")
 
             self._toggle_bc_ad()
             self._update_ranges()
@@ -3253,8 +3289,8 @@ class TimelineEditor(ttk.Frame):
             age_name = self._get_time_name("ages", int(self.current_age.get()))
             display_parts.append(age_name)
             
-        # Show years if Years is enabled OR Ages is enabled (since ages need years)
-        if visible_units.get("years", True) or visible_units.get("ages", True):
+        # Show years if Years is enabled
+        if visible_units.get("years", True):
             year_name = self._get_time_name("years", int(self.current_year.get()))
             display_parts.append(year_name)
             
@@ -3634,51 +3670,33 @@ class TimelineEditor(ttk.Frame):
             "day_of_month": int(self.current_day_of_month.get())
         }
         
-        # Configure highlight tag
         self.events_tree.tag_configure('highlighted', background='lightblue')
         
-        # Clear all existing highlights
-        for item in self.events_tree.get_children():
-            self.events_tree.item(item, tags=())
-            # Also clear sub-events
-            for sub_item in self.events_tree.get_children(item):
-                self.events_tree.item(sub_item, tags=())
-        
-        # Check each event for matches
-        for i, event in enumerate(self.config_data["events"]):
-            start_time = event.get('start_time', {})
-            end_time = event.get('end_time')
-            
-            # Check if current time matches start time or is within range
-            matches_start = self._times_match(current_time, start_time)
-            in_range = False
-            
-            if end_time:
-                in_range = self._time_in_range(current_time, start_time, end_time)
-            
-            if matches_start or in_range:
-                item_id = str(i)
-                if item_id in [child for child in self.events_tree.get_children()]:
+        # Recursively clear and check all tree items
+        def process_tree_items(parent_id, events_list, id_prefix=""):
+            for idx, event in enumerate(events_list):
+                item_id = f"{id_prefix}{idx}" if not id_prefix else f"{id_prefix}_{idx}"
+                if not id_prefix:
+                    item_id = str(idx)
+                
+                # Clear highlight
+                try:
+                    self.events_tree.item(item_id, tags=())
+                except Exception:
+                    continue
+                
+                # Check match
+                start_time = event.get('start_time', {})
+                end_time = event.get('end_time')
+                if self._times_match(current_time, start_time) or (end_time and self._time_in_range(current_time, start_time, end_time)):
                     self.events_tree.item(item_id, tags=('highlighted',))
-            
-            # Check sub-events
-            sub_events = event.get('sub_events', [])
-            for sub_index, sub_event in enumerate(sub_events):
-                sub_start_time = sub_event.get('start_time', {})
-                sub_end_time = sub_event.get('end_time')
                 
-                sub_matches_start = self._times_match(current_time, sub_start_time)
-                sub_in_range = False
-                
-                if sub_end_time:
-                    sub_in_range = self._time_in_range(current_time, sub_start_time, sub_end_time)
-                
-                if sub_matches_start or sub_in_range:
-                    sub_item_id = f"{i}_{sub_index}"
-                    for child in self.events_tree.get_children(str(i)):
-                        if child.endswith(f"_{sub_index}"):
-                            self.events_tree.item(child, tags=('highlighted',))
-                            break
+                # Recurse into sub-events
+                sub_events = event.get('sub_events', [])
+                if sub_events:
+                    process_tree_items(item_id, sub_events, item_id)
+        
+        process_tree_items('', self.config_data["events"])
 
     def _times_match(self, time1, time2):
         """Check if two time dictionaries match."""
@@ -3686,8 +3704,8 @@ class TimelineEditor(ttk.Frame):
         
         if visible_units.get("ages", True) and time1.get("age") != time2.get("age"):
             return False
-        # Check years if Years is enabled OR Ages is enabled (since ages need years)
-        if (visible_units.get("years", True) or visible_units.get("ages", True)) and time1.get("year") != time2.get("year"):
+        # Check years if Years is enabled
+        if visible_units.get("years", True) and time1.get("year") != time2.get("year"):
             return False
         if visible_units.get("months", True) and time1.get("month") != time2.get("month"):
             return False
@@ -3715,8 +3733,8 @@ class TimelineEditor(ttk.Frame):
             age_name = self._get_time_name("ages", time_data.get('age', 1))
             display_parts.append(age_name)
             
-        # Show years if Years is enabled OR Ages is enabled (since ages need years)
-        if visible_units.get("years", True) or visible_units.get("ages", True):
+        # Show years if Years is enabled
+        if visible_units.get("years", True):
             year_name = self._get_time_name("years", time_data.get('year', 1))
             display_parts.append(year_name)
             
@@ -4111,7 +4129,7 @@ class TimelineEventDialog(tk.Toplevel):
             ttk.Spinbox(parent, from_=1, to=age_count, width=8, textvariable=var).grid(row=row_offset+1, column=col, padx=5)
             col += 1
             
-        if visible_units.get("years", True) or visible_units.get("ages", True):
+        if visible_units.get("years", True):
             ttk.Label(parent, text="Year:").grid(row=row_offset, column=col, padx=5)
             var = tk.IntVar(value=time_data.get('year', 1))
             setattr(self, f"{prefix}_year_var", var)
@@ -4164,7 +4182,7 @@ class TimelineEventDialog(tk.Toplevel):
         if visible_units.get("ages", True) and hasattr(self, f"{prefix}_age_var"):
             time_data["age"] = getattr(self, f"{prefix}_age_var").get()
         # Include years if Ages OR Years is enabled (since ages need years)
-        if (visible_units.get("years", True) or visible_units.get("ages", True)) and hasattr(self, f"{prefix}_year_var"):
+        if visible_units.get("years", True) and hasattr(self, f"{prefix}_year_var"):
             time_data["year"] = getattr(self, f"{prefix}_year_var").get()
         if visible_units.get("months", True) and hasattr(self, f"{prefix}_month_var"):
             time_data["month"] = getattr(self, f"{prefix}_month_var").get()
@@ -4478,6 +4496,779 @@ class EventCreationDialog(tk.Toplevel):
         self.destroy()
 
     def cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class ImageViewer(ttk.Frame):
+    """Displays an image from disk with pin/marker overlays."""
+
+    PIN_RADIUS = 6
+
+    def __init__(self, master, initial_content="", controller=None):
+        super().__init__(master)
+        self.controller = controller
+        self.image_ref = None
+        self._orig_image = None
+        self._markers = []
+        self._img_offset = (0, 0)  # top-left of displayed image on canvas
+        self._img_scale = 1.0
+
+        # Parse content (JSON with path+markers, or plain path for backward compat)
+        self._parse_content(initial_content)
+
+        # Controls
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(toolbar, text="Image path:").pack(side=tk.LEFT, padx=(0, 5))
+        self.path_var = tk.StringVar(value=self._image_path)
+        self.path_entry = ttk.Entry(toolbar, textvariable=self.path_var, width=50, state="readonly")
+        self.path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self._fit_mode = tk.BooleanVar(value=True)
+        self._fit_btn = ttk.Button(toolbar, text="Full Size", command=self._toggle_fit)
+        self._fit_btn.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(self, text="Right-click: place/edit pins & labels | Shift+drag: reposition",
+                 font=('Helvetica', 8), foreground='gray').pack(fill=tk.X, padx=5)
+
+        # Scrollable canvas
+        canvas_frame = ttk.Frame(self)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(canvas_frame, bg="#2b2b2b")
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vscroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        hscroll = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        hscroll.pack(fill=tk.X)
+        self.canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
+
+        # Bindings - use Button-3 for right-click (works on both Windows and Linux)
+        self.canvas.bind('<Button-3>', self._on_right_click)
+        self.canvas.bind('<Motion>', self._on_hover)
+        self._tooltip = None
+        self._hover_pin = None
+        self._drag_label_idx = None
+        self._blink_after = None
+        self.canvas.bind('<Shift-ButtonPress-1>', self._on_shift_drag_start)
+        self.canvas.bind('<Shift-B1-Motion>', self._on_shift_drag_motion)
+        self.canvas.bind('<Shift-ButtonRelease-1>', self._on_shift_drag_end)
+
+        self.after(50, self._initial_load)
+
+    def _initial_load(self):
+        """On first open, prompt for image if no path is set."""
+        if not self.path_var.get().strip():
+            self._browse()
+        self._load_image()
+
+    def _parse_content(self, content):
+        """Parse stored content - JSON format or plain path for backward compat."""
+        content = content.strip()
+        if not content:
+            self._image_path = ""
+            self._markers = []
+            self._labels = []
+            return
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict) and "path" in data:
+                self._image_path = data.get("path", "")
+                self._markers = data.get("markers", [])
+                self._labels = data.get("labels", [])
+                return
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Plain string fallback
+        self._image_path = content
+        self._markers = []
+        self._labels = []
+
+    def _get_save_dir(self):
+        """Get the directory of the .json save file."""
+        if self.controller and self.controller.file_path:
+            return os.path.dirname(os.path.abspath(self.controller.file_path))
+        return None
+
+    def _browse(self):
+        """Browse for an image file relative to the save directory."""
+        save_dir = self._get_save_dir()
+        if not save_dir:
+            messagebox.showwarning("No Save File", "Please save the world file first so images can be located relative to it.")
+            return
+        filepath = filedialog.askopenfilename(
+            initialdir=save_dir,
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("All Files", "*.*")],
+            title="Select Image"
+        )
+        if filepath:
+            rel_path = os.path.relpath(filepath, save_dir)
+            self.path_var.set(rel_path)
+            self._load_image()
+
+    def _load_image(self):
+        """Load and display the image."""
+        from PIL import Image, ImageTk
+        # Cancel any running animation
+        if hasattr(self, '_anim_after') and self._anim_after:
+            self.after_cancel(self._anim_after)
+            self._anim_after = None
+        self.canvas.delete("all")
+        self.image_ref = None
+
+        save_dir = self._get_save_dir()
+        rel_path = self.path_var.get().strip()
+        if not save_dir or not rel_path:
+            self.canvas.create_text(200, 100, text="No image path set" if not rel_path else "Save file first to resolve path",
+                                   fill="gray", font=('Helvetica', 12))
+            return
+
+        abs_path = os.path.normpath(os.path.join(save_dir, rel_path))
+        if not os.path.isfile(abs_path):
+            self.canvas.create_text(200, 100, text=f"File not found:\n{rel_path}",
+                                   fill="gray", font=('Helvetica', 12))
+            return
+
+        try:
+            img = Image.open(abs_path)
+            self._orig_image = img
+            self._anim_frames = None
+            self._anim_index = 0
+            self._anim_after = None
+
+            # Check for animated GIF
+            if getattr(img, 'is_animated', False):
+                self._load_animated(img, abs_path)
+            else:
+                self._display_image(img)
+        except Exception as e:
+            self.canvas.create_text(200, 100, text=f"Error loading image:\n{e}",
+                                   fill="red", font=('Helvetica', 10))
+
+    def _load_animated(self, img, abs_path):
+        """Load all frames of an animated GIF and pre-render them."""
+        from PIL import Image, ImageTk
+        frames = []
+        durations = []
+        try:
+            while True:
+                frames.append(img.copy().convert("RGBA"))
+                durations.append(img.info.get('duration', 100))
+                img.seek(img.tell() + 1)
+        except EOFError:
+            pass
+        self._anim_raw_frames = frames
+        self._anim_durations = durations
+        self._anim_index = 0
+        self._anim_photo_frames = None
+        # Display first frame normally to set up canvas, then start animation
+        self._display_image(frames[0])
+        self._pre_render_anim_frames(frames)
+        self._anim_image_id = self.canvas.find_withtag("bg_image")[0] if self.canvas.find_withtag("bg_image") else None
+        self._animate()
+
+    def _pre_render_anim_frames(self, frames):
+        """Pre-resize and convert all frames to PhotoImage for smooth playback."""
+        from PIL import Image, ImageTk
+        self._anim_photo_frames = []
+        for frame in frames:
+            if self._fit_mode.get():
+                cw = self.canvas.winfo_width() or 400
+                ch = self.canvas.winfo_height() or 400
+                ratio = min(cw / frame.width, ch / frame.height, 1.0)
+                new_size = (max(1, int(frame.width * ratio)), max(1, int(frame.height * ratio)))
+                resized = frame.resize(new_size, Image.LANCZOS)
+                self._anim_photo_frames.append(ImageTk.PhotoImage(resized))
+            else:
+                self._anim_photo_frames.append(ImageTk.PhotoImage(frame))
+
+    def _animate(self):
+        """Cycle to next frame without clearing canvas."""
+        if not self._anim_photo_frames:
+            return
+        self._anim_index = (self._anim_index + 1) % len(self._anim_photo_frames)
+        photo = self._anim_photo_frames[self._anim_index]
+        self.image_ref = photo  # Prevent GC
+        if self._anim_image_id:
+            self.canvas.itemconfig(self._anim_image_id, image=photo)
+        delay = self._anim_durations[self._anim_index] or 100
+        self._anim_after = self.after(delay, self._animate)
+
+    def _display_image(self, img):
+        """Display image with current fit mode and overlay pins."""
+        from PIL import Image, ImageTk
+        self.canvas.delete("all")
+        if self._fit_mode.get():
+            self.canvas.update_idletasks()
+            cw = self.canvas.winfo_width() or 400
+            ch = self.canvas.winfo_height() or 400
+            ratio = min(cw / img.width, ch / img.height, 1.0)
+            new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
+            display_img = img.resize(new_size, Image.LANCZOS)
+            self.image_ref = ImageTk.PhotoImage(display_img)
+            ox = (cw - new_size[0]) // 2
+            oy = (ch - new_size[1]) // 2
+            self._img_offset = (ox, oy)
+            self._img_scale = ratio
+            self.canvas.create_image(ox, oy, anchor="nw", image=self.image_ref, tags=("bg_image",))
+            self.canvas.configure(scrollregion=(0, 0, cw, ch))
+        else:
+            self.image_ref = ImageTk.PhotoImage(img)
+            self._img_offset = (0, 0)
+            self._img_scale = 1.0
+            self.canvas.create_image(0, 0, anchor="nw", image=self.image_ref, tags=("bg_image",))
+            self.canvas.configure(scrollregion=(0, 0, img.width, img.height))
+        self._draw_markers()
+
+    def _toggle_fit(self):
+        """Toggle between fit-to-window and full size."""
+        self._fit_mode.set(not self._fit_mode.get())
+        self._fit_btn.config(text="Full Size" if self._fit_mode.get() else "Fit to Window")
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
+        if hasattr(self, '_anim_raw_frames') and self._anim_raw_frames:
+            # Re-render animated frames for new mode
+            if hasattr(self, '_anim_after') and self._anim_after:
+                self.after_cancel(self._anim_after)
+                self._anim_after = None
+            self._display_image(self._anim_raw_frames[0])
+            self._pre_render_anim_frames(self._anim_raw_frames)
+            self._anim_image_id = self.canvas.find_withtag("bg_image")[0] if self.canvas.find_withtag("bg_image") else None
+            self._anim_index = 0
+            self._animate()
+        elif self._orig_image:
+            self._display_image(self._orig_image)
+
+    def _draw_markers(self):
+        """Draw all pin markers on the canvas at scaled positions."""
+        self.canvas.delete("pins")
+        if hasattr(self, '_blink_after') and self._blink_after:
+            self.after_cancel(self._blink_after)
+            self._blink_after = None
+        if not self._orig_image:
+            return
+        iw, ih = self._orig_image.width, self._orig_image.height
+        ox, oy = self._img_offset
+        scale = self._img_scale
+        r = self.PIN_RADIUS
+        has_blink = False
+
+        for i, marker in enumerate(self._markers):
+            cx = ox + marker["x"] * iw * scale
+            cy = oy + marker["y"] * ih * scale
+            color = marker.get("color", "#FF0000")
+            tags = ("pins", f"pin_{i}")
+            if marker.get("blink"):
+                tags = ("pins", "blink_pin", f"pin_{i}")
+                has_blink = True
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                   fill=color, outline="white", width=2, tags=tags)
+            label = marker.get("label", "")
+            if label:
+                self.canvas.create_text(cx, cy - r - 8, text=label,
+                                       fill="white", font=('Helvetica', 8, 'bold'), tags=tags)
+
+        if has_blink:
+            self._blink_visible = True
+            self._blink_after = self.after(500, self._blink_pins)
+        self._draw_labels()
+
+    def _blink_pins(self):
+        """Toggle visibility of blinking pins."""
+        self._blink_visible = not self._blink_visible
+        state = "normal" if self._blink_visible else "hidden"
+        self.canvas.itemconfigure("blink_pin", state=state)
+        self._blink_after = self.after(500, self._blink_pins)
+
+    def _draw_labels(self):
+        """Draw all floating text labels on the canvas."""
+        self.canvas.delete("labels")
+        if not self._orig_image:
+            return
+        iw, ih = self._orig_image.width, self._orig_image.height
+        ox, oy = self._img_offset
+        scale = self._img_scale
+
+        for i, label in enumerate(self._labels):
+            cx = ox + label["x"] * iw * scale
+            cy = oy + label["y"] * ih * scale
+            color = label.get("color", "#FFFFFF")
+            size = max(1, int(label.get("size", 12) * scale))
+            text = label.get("text", "")
+            border = label.get("border", False)
+            font = ('Helvetica', size, 'bold')
+
+            if border:
+                # Draw background rectangle
+                tid = self.canvas.create_text(cx, cy, text=text, fill=color, font=font,
+                                            anchor="center", tags=("labels", f"label_{i}"))
+                bbox = self.canvas.bbox(tid)
+                if bbox:
+                    pad = 4
+                    bg_color = label.get("bg_color", "#000000")
+                    border_color = label.get("border_color", "#FFFFFF")
+                    self.canvas.create_rectangle(bbox[0] - pad, bbox[1] - pad,
+                                               bbox[2] + pad, bbox[3] + pad,
+                                               fill=bg_color, outline=border_color, width=1,
+                                               tags=("labels", f"labelbg_{i}"))
+                    self.canvas.tag_raise(tid)
+            else:
+                self.canvas.create_text(cx, cy, text=text, fill=color, font=font,
+                                       anchor="center", tags=("labels", f"label_{i}"))
+
+    def _canvas_to_image_coords(self, cx, cy):
+        """Convert canvas pixel coords to normalized image coords (0-1)."""
+        if not self._orig_image:
+            return None, None
+        ox, oy = self._img_offset
+        scale = self._img_scale
+        iw, ih = self._orig_image.width, self._orig_image.height
+        x = (cx - ox) / (iw * scale)
+        y = (cy - oy) / (ih * scale)
+        if 0 <= x <= 1 and 0 <= y <= 1:
+            return x, y
+        return None, None
+
+    def _find_pin_at(self, cx, cy):
+        """Find marker index at canvas position, or None."""
+        if not self._orig_image:
+            return None
+        ox, oy = self._img_offset
+        scale = self._img_scale
+        iw, ih = self._orig_image.width, self._orig_image.height
+        r = self.PIN_RADIUS + 4
+        for i, marker in enumerate(self._markers):
+            px = ox + marker["x"] * iw * scale
+            py = oy + marker["y"] * ih * scale
+            if abs(cx - px) <= r and abs(cy - py) <= r:
+                return i
+        return None
+
+    def _on_hover(self, event):
+        """Show tooltip with note when hovering over a pin (800ms delay)."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        pin_idx = self._find_pin_at(cx, cy)
+
+        if pin_idx == self._hover_pin:
+            return
+
+        # Cancel pending tooltip
+        if hasattr(self, '_hover_after') and self._hover_after:
+            self.after_cancel(self._hover_after)
+            self._hover_after = None
+
+        # Destroy old tooltip
+        if self._tooltip:
+            self._tooltip.destroy()
+            self._tooltip = None
+        self._hover_pin = pin_idx
+
+        if pin_idx is None:
+            return
+
+        marker = self._markers[pin_idx]
+        lines = []
+        if marker.get("label"):
+            lines.append(marker["label"])
+        if marker.get("note"):
+            lines.append(marker["note"])
+        if not lines:
+            return
+
+        def show_tip():
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+            lbl = tk.Label(tip, text="\n".join(lines), background="#ffffe0",
+                          relief="solid", borderwidth=1, font=('Helvetica', 9),
+                          justify=tk.LEFT, wraplength=250)
+            lbl.pack()
+            self._tooltip = tip
+
+        self._hover_after = self.after(800, show_tip)
+
+    def _on_shift_drag_start(self, event):
+        """Start dragging a pin or label if shift+click is on one."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        self._drag_label_idx = None
+        self._drag_pin_idx = None
+        pin_idx = self._find_pin_at(cx, cy)
+        if pin_idx is not None:
+            self._drag_pin_idx = pin_idx
+            self.canvas.config(cursor="fleur")
+            return
+        label_idx = self._find_label_at(cx, cy)
+        if label_idx is not None:
+            self._drag_label_idx = label_idx
+            self.canvas.config(cursor="fleur")
+
+    def _on_shift_drag_motion(self, event):
+        """Move the pin or label to follow the cursor."""
+        if self._drag_pin_idx is None and self._drag_label_idx is None:
+            return
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        x, y = self._canvas_to_image_coords(cx, cy)
+        if x is None:
+            return
+        if self._drag_pin_idx is not None:
+            self._markers[self._drag_pin_idx]["x"] = x
+            self._markers[self._drag_pin_idx]["y"] = y
+            self._draw_markers()
+        elif self._drag_label_idx is not None:
+            self._labels[self._drag_label_idx]["x"] = x
+            self._labels[self._drag_label_idx]["y"] = y
+            self._draw_labels()
+
+    def _on_shift_drag_end(self, event):
+        """Finish dragging."""
+        self._drag_label_idx = None
+        self._drag_pin_idx = None
+        self.canvas.config(cursor="")
+
+    def _on_right_click(self, event):
+        """Right-click: place pin/label on image, or edit/delete existing."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        pin_idx = self._find_pin_at(cx, cy)
+        label_idx = self._find_label_at(cx, cy)
+        menu = tk.Menu(self, tearoff=0)
+
+        if pin_idx is not None:
+            marker = self._markers[pin_idx]
+            if marker.get("link") and self.controller:
+                menu.add_command(label=f"Open: {marker.get('label', marker['link'])}",
+                               command=lambda: self.controller._open_file_editor(marker["link"].split('/')))
+                menu.add_separator()
+            menu.add_command(label="Edit Pin", command=lambda: self._edit_pin(pin_idx))
+            menu.add_command(label="Delete Pin", command=lambda: self._delete_pin(pin_idx))
+        elif label_idx is not None:
+            lbl = self._labels[label_idx]
+            if lbl.get("link") and self.controller:
+                menu.add_command(label=f"Open: {lbl['link'].split('/')[-1]}",
+                               command=lambda: self.controller._open_file_editor(lbl["link"].split('/')))
+                menu.add_separator()
+            menu.add_command(label="Edit Label", command=lambda: self._edit_label(label_idx))
+            menu.add_command(label="Delete Label", command=lambda: self._delete_label(label_idx))
+        else:
+            x, y = self._canvas_to_image_coords(cx, cy)
+            if x is not None:
+                menu.add_command(label="Place Pin Here", command=lambda: self._add_pin(x, y))
+                menu.add_command(label="Place Label Here", command=lambda: self._add_label(x, y))
+            else:
+                return
+
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _find_label_at(self, cx, cy):
+        """Find label index at canvas position, or None."""
+        if not self._orig_image:
+            return None
+        ox, oy = self._img_offset
+        scale = self._img_scale
+        iw, ih = self._orig_image.width, self._orig_image.height
+        for i, label in enumerate(self._labels):
+            lx = ox + label["x"] * iw * scale
+            ly = oy + label["y"] * ih * scale
+            size = label.get("size", 12)
+            # Approximate hit area based on text size
+            half_w = max(len(label.get("text", "")) * size * 0.35, 20)
+            half_h = size
+            if abs(cx - lx) <= half_w and abs(cy - ly) <= half_h:
+                return i
+        return None
+
+    def _add_pin(self, x, y):
+        """Add a new pin at normalized coords and open edit dialog."""
+        marker = {"x": x, "y": y, "label": "", "note": "", "link": "", "color": "#FF0000"}
+        dialog = PinEditDialog(self, marker, self.controller)
+        if dialog.result:
+            self._markers.append(dialog.result)
+            self._draw_markers()
+
+    def _edit_pin(self, idx):
+        """Edit an existing pin."""
+        dialog = PinEditDialog(self, self._markers[idx], self.controller)
+        if dialog.result:
+            self._markers[idx] = dialog.result
+            self._draw_markers()
+
+    def _delete_pin(self, idx):
+        """Delete a pin."""
+        if messagebox.askyesno("Delete Pin", f"Delete pin '{self._markers[idx].get('label', 'Unnamed')}'?"):
+            del self._markers[idx]
+            self._draw_markers()
+
+    def _add_label(self, x, y):
+        """Add a new floating text label."""
+        label = {"x": x, "y": y, "text": "", "color": "#000000", "size": 12, "border": False, "bg_color": "#000000", "border_color": "#FFFFFF"}
+        dialog = LabelEditDialog(self, label)
+        if dialog.result:
+            self._labels.append(dialog.result)
+            self._draw_labels()
+
+    def _edit_label(self, idx):
+        """Edit an existing label."""
+        dialog = LabelEditDialog(self, self._labels[idx])
+        if dialog.result:
+            self._labels[idx] = dialog.result
+            self._draw_labels()
+
+    def _delete_label(self, idx):
+        """Delete a label."""
+        if messagebox.askyesno("Delete Label", f"Delete label '{self._labels[idx].get('text', '')}'?"):
+            del self._labels[idx]
+            self._draw_labels()
+
+    def get_content(self):
+        """Return JSON with image path, markers, and labels."""
+        return json.dumps({"path": self.path_var.get().strip(), "markers": self._markers, "labels": self._labels})
+
+
+class PinEditDialog(tk.Toplevel):
+    """Dialog for editing a pin's label, note, link, and color."""
+    def __init__(self, parent, marker, controller=None):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Edit Pin")
+        self.result = None
+        self.controller = controller
+        self.geometry("400x250")
+
+        ttk.Label(self, text="Label:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        self.label_var = tk.StringVar(value=marker.get("label", ""))
+        ttk.Entry(self, textvariable=self.label_var, width=30).grid(row=0, column=1, sticky="ew", padx=10, pady=5)
+
+        ttk.Label(self, text="Note:").grid(row=1, column=0, sticky="nw", padx=10, pady=5)
+        self.note_text = tk.Text(self, width=30, height=3)
+        self.note_text.grid(row=1, column=1, sticky="ew", padx=10, pady=5)
+        self.note_text.insert("1.0", marker.get("note", ""))
+
+        ttk.Label(self, text="Link:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        link_frame = ttk.Frame(self)
+        link_frame.grid(row=2, column=1, sticky="ew", padx=10, pady=5)
+        self.link_var = tk.StringVar(value=marker.get("link", ""))
+        ttk.Entry(link_frame, textvariable=self.link_var, width=22).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(link_frame, text="Pick", command=self._pick_link).pack(side=tk.LEFT, padx=(5, 0))
+
+        ttk.Label(self, text="Color:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        color_frame = ttk.Frame(self)
+        color_frame.grid(row=3, column=1, sticky="ew", padx=10, pady=5)
+        self.color_var = tk.StringVar(value=marker.get("color", "#FF0000"))
+        self.color_preview = tk.Label(color_frame, width=3, bg=self.color_var.get())
+        self.color_preview.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(color_frame, text="Choose", command=self._pick_color).pack(side=tk.LEFT)
+
+        # Store original coords
+        self._x = marker.get("x", 0)
+        self._y = marker.get("y", 0)
+
+        self.blink_var = tk.BooleanVar(value=marker.get("blink", False))
+        ttk.Checkbutton(self, text="Blink", variable=self.blink_var).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=5)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
+
+        self.columnconfigure(1, weight=1)
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self.wait_window(self)
+
+    def _pick_link(self):
+        """Open VFS file picker to select a link target."""
+        if not self.controller:
+            return
+        picker = VFSFilePicker(self, self.controller.vfs, self.controller.root_name)
+        if picker.result:
+            self.link_var.set(picker.result)
+
+    def _pick_color(self):
+        """Open color chooser."""
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(initialcolor=self.color_var.get(), parent=self)
+        if color[1]:
+            self.color_var.set(color[1])
+            self.color_preview.config(bg=color[1])
+
+    def _ok(self):
+        self.result = {
+            "x": self._x, "y": self._y,
+            "label": self.label_var.get().strip(),
+            "note": self.note_text.get("1.0", tk.END).strip(),
+            "link": self.link_var.get().strip(),
+            "color": self.color_var.get(),
+            "blink": self.blink_var.get()
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class LabelEditDialog(tk.Toplevel):
+    """Dialog for editing a floating text label."""
+    _last_color = "#000000"
+    _last_size = 12
+    _last_border = False
+    _last_bg_color = "#000000"
+    _last_border_color = "#FFFFFF"
+
+    def __init__(self, parent, label_data):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Edit Label")
+        self.result = None
+        self._parent = parent
+        self.geometry("350x300")
+
+        self._load_defaults_from_config()
+
+        self._x = label_data.get("x", 0)
+        self._y = label_data.get("y", 0)
+        is_new = not label_data.get("text", "")
+
+        ttk.Label(self, text="Text:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        self.text_var = tk.StringVar(value=label_data.get("text", ""))
+        ttk.Entry(self, textvariable=self.text_var, width=30).grid(row=0, column=1, sticky="ew", padx=10, pady=5)
+
+        ttk.Label(self, text="Size:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        self.size_var = tk.IntVar(value=LabelEditDialog._last_size if is_new else label_data.get("size", 12))
+        ttk.Spinbox(self, from_=6, to=72, width=6, textvariable=self.size_var).grid(row=1, column=1, sticky="w", padx=10, pady=5)
+
+        ttk.Label(self, text="Text Color:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        self.color_var = tk.StringVar(value=LabelEditDialog._last_color if is_new else label_data.get("color", "#000000"))
+        self._color_btn(self, self.color_var, 2)
+
+        self.border_var = tk.BooleanVar(value=LabelEditDialog._last_border if is_new else label_data.get("border", False))
+        ttk.Checkbutton(self, text="Show border/background", variable=self.border_var,
+                       command=self._toggle_border_options).grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=5)
+
+        self.bg_label = ttk.Label(self, text="Background:")
+        self.bg_label.grid(row=4, column=0, sticky="w", padx=10, pady=5)
+        self.bg_color_var = tk.StringVar(value=LabelEditDialog._last_bg_color if is_new else label_data.get("bg_color", "#000000"))
+        self.bg_frame = self._color_btn(self, self.bg_color_var, 4)
+
+        self.bc_label = ttk.Label(self, text="Border Color:")
+        self.bc_label.grid(row=5, column=0, sticky="w", padx=10, pady=5)
+        self.border_color_var = tk.StringVar(value=LabelEditDialog._last_border_color if is_new else label_data.get("border_color", "#FFFFFF"))
+        self.bc_frame = self._color_btn(self, self.border_color_var, 5)
+
+        ttk.Label(self, text="Link:").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+        link_frame = ttk.Frame(self)
+        link_frame.grid(row=6, column=1, sticky="ew", padx=10, pady=5)
+        self.link_var = tk.StringVar(value=label_data.get("link", ""))
+        ttk.Entry(link_frame, textvariable=self.link_var, width=22).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(link_frame, text="Pick", command=self._pick_link).pack(side=tk.LEFT, padx=(5, 0))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=7, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
+
+        self.columnconfigure(1, weight=1)
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self._toggle_border_options()
+        self.wait_window(self)
+
+    def _load_defaults_from_config(self):
+        controller = getattr(self._parent, 'controller', None)
+        if controller:
+            config = controller._load_config()
+            d = config.get("label_defaults", {})
+            if d:
+                LabelEditDialog._last_color = d.get("color", LabelEditDialog._last_color)
+                LabelEditDialog._last_size = d.get("size", LabelEditDialog._last_size)
+                LabelEditDialog._last_border = d.get("border", LabelEditDialog._last_border)
+                LabelEditDialog._last_bg_color = d.get("bg_color", LabelEditDialog._last_bg_color)
+                LabelEditDialog._last_border_color = d.get("border_color", LabelEditDialog._last_border_color)
+
+    def _save_defaults_to_config(self):
+        controller = getattr(self._parent, 'controller', None)
+        if controller:
+            config = controller._load_config()
+            config["label_defaults"] = {
+                "color": self.color_var.get(),
+                "size": self.size_var.get(),
+                "border": self.border_var.get(),
+                "bg_color": self.bg_color_var.get(),
+                "border_color": self.border_color_var.get()
+            }
+            try:
+                with open(controller.CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+            except Exception:
+                pass
+
+    def _pick_link(self):
+        """Open VFS file picker to select a link target."""
+        controller = getattr(self._parent, 'controller', None)
+        if not controller:
+            return
+        picker = VFSFilePicker(self, controller.vfs, controller.root_name)
+        if picker.result:
+            self.link_var.set(picker.result)
+
+    def _toggle_border_options(self):
+        if self.border_var.get():
+            self.bg_label.grid()
+            self.bg_frame.grid()
+            self.bc_label.grid()
+            self.bc_frame.grid()
+        else:
+            self.bg_label.grid_remove()
+            self.bg_frame.grid_remove()
+            self.bc_label.grid_remove()
+            self.bc_frame.grid_remove()
+
+    def _color_btn(self, parent, var, row):
+        """Create a color preview + choose button in the given row."""
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=1, sticky="ew", padx=10, pady=5)
+        preview = tk.Label(frame, width=3, bg=var.get())
+        preview.pack(side=tk.LEFT, padx=(0, 5))
+        def pick():
+            from tkinter import colorchooser
+            color = colorchooser.askcolor(initialcolor=var.get(), parent=self)
+            if color[1]:
+                var.set(color[1])
+                preview.config(bg=color[1])
+        ttk.Button(frame, text="Choose", command=pick).pack(side=tk.LEFT)
+        return frame
+
+    def _ok(self):
+        text = self.text_var.get().strip()
+        if not text:
+            messagebox.showerror("Error", "Text is required.", parent=self)
+            return
+        LabelEditDialog._last_color = self.color_var.get()
+        LabelEditDialog._last_size = self.size_var.get()
+        LabelEditDialog._last_border = self.border_var.get()
+        LabelEditDialog._last_bg_color = self.bg_color_var.get()
+        LabelEditDialog._last_border_color = self.border_color_var.get()
+        self._save_defaults_to_config()
+
+        self.result = {
+            "x": self._x, "y": self._y,
+            "text": text,
+            "color": self.color_var.get(),
+            "size": self.size_var.get(),
+            "border": self.border_var.get(),
+            "bg_color": self.bg_color_var.get(),
+            "border_color": self.border_color_var.get(),
+            "link": self.link_var.get().strip()
+        }
+        self.destroy()
+
+    def _cancel(self):
         self.result = None
         self.destroy()
 
