@@ -3,7 +3,19 @@ from tkinter import ttk, filedialog, simpledialog, messagebox
 import json
 import re
 import os
-import uuid 
+import sys
+import uuid
+from spellchecker import SpellChecker
+
+if sys.platform == 'win32':
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+
+
+def resource_path(relative_path):
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
+
 
 # --- Global Chronology Parsing Utilities ---
 
@@ -84,6 +96,10 @@ class WorldBuilderArchive(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Storyboard") 
+        try:
+            self.iconbitmap(resource_path("logo.ico"))
+        except tk.TclError:
+            pass
         self.geometry("1200x800")
         
         # --- Application State Management ---
@@ -100,12 +116,13 @@ class WorldBuilderArchive(tk.Tk):
         # --- UI Initialization ---
         self._create_icons()
         self._setup_layout()
+        self._apply_theme()
         self._populate_vfs_tree()
         
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         
-        # Prompt to reopen last file
-        self._prompt_reopen_last_file()
+        # Prompt to reopen last file (deferred so mainloop is running and focus works)
+        self.after(100, self._prompt_reopen_last_file)
 
     # --- Config File Management ---
 
@@ -305,6 +322,8 @@ class WorldBuilderArchive(tk.Tk):
         # CRITICAL: Save editor content to VFS before writing VFS to disk
         self._save_editor_content_to_vfs() 
         
+        old_file_path = self.file_path
+        
         filepath = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("World Archive Files", "*.json")],
@@ -334,6 +353,82 @@ class WorldBuilderArchive(tk.Tk):
         self._write_vfs_to_disk(filepath)
         self.file_path = filepath
         self.title(f"Storyboard - {self.root_name} (Saved)")
+        
+        # 3. Offer to copy .dict and images to new location
+        if old_file_path:
+            self._offer_copy_assets(old_file_path, filepath)
+
+    def _collect_image_paths(self):
+        """Traverse VFS and collect all relative image paths from .image file nodes."""
+        paths = []
+        def walk(node):
+            if node.get("type") == "dir":
+                for name, child in node.get("children", {}).items():
+                    if child.get("type") == "file" and name.lower().endswith(".image"):
+                        try:
+                            data = json.loads(child.get("content", ""))
+                            if isinstance(data, dict) and data.get("path"):
+                                paths.append(data["path"])
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    elif child.get("type") == "dir":
+                        walk(child)
+        root = self.vfs.get(self.root_name)
+        if root:
+            walk(root)
+        return paths
+
+    def _offer_copy_assets(self, old_file_path, new_file_path):
+        """Prompt user to copy .dict and linked images to the new save location."""
+        import shutil
+        
+        old_dir = os.path.dirname(os.path.abspath(old_file_path))
+        new_dir = os.path.dirname(os.path.abspath(new_file_path))
+        old_base = os.path.splitext(old_file_path)[0]
+        new_base = os.path.splitext(new_file_path)[0]
+        
+        old_dict = old_base + ".dict"
+        new_dict = new_base + ".dict"
+        
+        has_dict = os.path.isfile(old_dict) and os.path.abspath(old_dict) != os.path.abspath(new_dict)
+        image_paths = self._collect_image_paths()
+        dir_changed = os.path.abspath(old_dir) != os.path.abspath(new_dir)
+        # Only offer image copy if directory changed (relative paths would break)
+        has_images = dir_changed and len(image_paths) > 0
+        
+        if not has_dict and not has_images:
+            return
+        
+        parts = []
+        if has_dict:
+            parts.append("custom dictionary")
+        if has_images:
+            parts.append(f"{len(image_paths)} linked image(s)")
+        
+        msg = f"Copy {' and '.join(parts)} to the new location?"
+        if not messagebox.askyesno("Copy Assets", msg):
+            return
+        
+        # Copy .dict
+        if has_dict:
+            try:
+                shutil.copy2(old_dict, new_dict)
+            except Exception:
+                pass
+        
+        # Copy images and update paths in VFS
+        if has_images:
+            for rel_path in image_paths:
+                src = os.path.normpath(os.path.join(old_dir, rel_path))
+                dst = os.path.normpath(os.path.join(new_dir, rel_path))
+                if os.path.isfile(src) and src != dst:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+            # Re-save since image relative paths stay the same (copied to same relative location)
+            self._write_vfs_to_disk(new_file_path)
 
     def save_world(self):
         """Saves the current world to the last opened/saved file path."""
@@ -346,6 +441,168 @@ class WorldBuilderArchive(tk.Tk):
         else:
             # If no path exists (fresh app load), prompt for Save As
             self.save_world_as()
+
+    # --- Link Rewriting ---
+
+    def _rewrite_links(self, old_prefix, new_prefix):
+        """Traverse entire VFS and rewrite any link paths starting with old_prefix to new_prefix."""
+        def rewrite_in_node(node):
+            if node.get("type") == "file":
+                content = node.get("content", "")
+                if not content:
+                    return
+                node["content"] = self._rewrite_content_links(content, old_prefix, new_prefix)
+            elif node.get("type") == "dir":
+                for child in node.get("children", {}).values():
+                    rewrite_in_node(child)
+
+        root = self.vfs.get(self.root_name)
+        if root:
+            rewrite_in_node(root)
+
+        # Refresh the active editor so it picks up rewritten links
+        self._refresh_active_editor()
+
+        # Also update popped-out windows
+        for path_string, win in list(self._popped_out_files.items()):
+            if win.winfo_exists():
+                for widget in win.winfo_children():
+                    for child in widget.winfo_children():
+                        if hasattr(child, '_markers'):
+                            path_list = path_string.split('/')
+                            content = self._get_file_content(path_list)
+                            try:
+                                data = json.loads(content)
+                                child._markers = data.get("markers", [])
+                                child._labels = data.get("labels", [])
+                                child._draw_markers()
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+
+    def _refresh_active_editor(self):
+        """Reload the active editor from VFS content to pick up rewritten links."""
+        if not self.active_file_path or not self.active_editor:
+            return
+        if not hasattr(self.active_editor, 'winfo_exists') or not self.active_editor.winfo_exists():
+            return
+        # Clear and rebuild without saving stale content back
+        self._clear_right_panel()
+        content = self._get_file_content(self.active_file_path)
+        file_name = self.active_file_path[-1]
+
+        editor_frame = ttk.Frame(self._editor_area)
+        editor_frame.pack(fill=tk.BOTH, expand=True)
+
+        if file_name.lower().endswith('.table'):
+            self.active_editor = CSVGrid(editor_frame, content, name_regex=self.NAME_REGEX, controller=self)
+        elif file_name.lower().endswith('.timeline'):
+            self.active_editor = TimelineEditor(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.image'):
+            self.active_editor = ImageViewer(editor_frame, content, controller=self)
+        else:
+            self.active_editor = TextEditor(editor_frame, content, controller=self)
+
+        self.active_editor.pack(fill=tk.BOTH, expand=True)
+
+    def _update_popped_out_paths(self, old_prefix, new_prefix):
+        """Update popped-out window keys and close handlers when files are moved/renamed."""
+        updates = {}
+        for path_string, win in list(self._popped_out_files.items()):
+            new_path_string = None
+            if path_string == old_prefix:
+                new_path_string = new_prefix
+            elif path_string.startswith(old_prefix + "/"):
+                new_path_string = new_prefix + path_string[len(old_prefix):]
+            if new_path_string:
+                updates[path_string] = new_path_string
+
+        for old_ps, new_ps in updates.items():
+            win = self._popped_out_files.pop(old_ps)
+            self._popped_out_files[new_ps] = win
+            new_path_list = new_ps.split('/')
+            win.title(f"Storyboard - {new_path_list[-1]}")
+            # Rebind the close handler to use the new path
+            def make_on_close(w, ps, pl):
+                def on_close():
+                    for widget in w.winfo_children():
+                        for child in widget.winfo_children():
+                            if hasattr(child, 'get_content') and child.winfo_exists():
+                                self._set_file_content(pl, child.get_content())
+                                break
+                    self._popped_out_files.pop(ps, None)
+                    w.destroy()
+                    if pl not in self._open_tabs:
+                        self._open_tabs.append(list(pl))
+                    self._rebuild_tab_bar()
+                    self._switch_to_tab(pl)
+                return on_close
+            win.protocol("WM_DELETE_WINDOW", make_on_close(win, new_ps, new_path_list))
+
+    def _rewrite_content_links(self, content, old_prefix, new_prefix):
+        """Rewrite links in file content based on file type (JSON text, timeline, table, image)."""
+        content = content.strip()
+        if not content:
+            return content
+
+        # Try JSON first (TextEditor, Timeline, Image)
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                if "text" in data and "tags" in data:
+                    # TextEditor format
+                    for tag in data.get("tags", []):
+                        if tag.get("tag") == "link" and "path" in tag:
+                            tag["path"] = self._replace_path(tag["path"], old_prefix, new_prefix)
+                    return json.dumps(data)
+                elif "time_units" in data or "events" in data:
+                    # Timeline format
+                    self._rewrite_timeline_links(data, old_prefix, new_prefix)
+                    return json.dumps(data, indent=4)
+                elif "markers" in data or "labels" in data:
+                    # Image format
+                    for marker in data.get("markers", []):
+                        if marker.get("link"):
+                            marker["link"] = self._replace_path(marker["link"], old_prefix, new_prefix)
+                    for label in data.get("labels", []):
+                        if label.get("link"):
+                            label["link"] = self._replace_path(label["link"], old_prefix, new_prefix)
+                    return json.dumps(data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # CSV/table format: rewrite [[path|display]] links
+        return LINK_REGEX.sub(lambda m: self._replace_link_match(m, old_prefix, new_prefix), content)
+
+    def _replace_path(self, path, old_prefix, new_prefix):
+        """Replace old_prefix with new_prefix in a path string."""
+        if path == old_prefix:
+            return new_prefix
+        if path.startswith(old_prefix + "/"):
+            return new_prefix + path[len(old_prefix):]
+        return path
+
+    def _replace_link_match(self, match, old_prefix, new_prefix):
+        """Regex sub callback for [[path|display]] links."""
+        path = match.group(1)
+        display = match.group(2)
+        new_path = self._replace_path(path, old_prefix, new_prefix)
+        if display:
+            return f"[[{new_path}|{display}]]"
+        return f"[[{new_path}]]"
+
+    def _rewrite_timeline_links(self, data, old_prefix, new_prefix):
+        """Rewrite [[path|display]] links in timeline events recursively."""
+        def rewrite_event(evt):
+            for field in ("name", "description"):
+                if evt.get(field):
+                    evt[field] = LINK_REGEX.sub(
+                        lambda m: self._replace_link_match(m, old_prefix, new_prefix),
+                        evt[field])
+            for sub in evt.get("sub_events", []):
+                rewrite_event(sub)
+
+        for evt in data.get("events", []):
+            rewrite_event(evt)
 
     # --- Guarded VFS Access Methods ---
     
@@ -495,6 +752,8 @@ class WorldBuilderArchive(tk.Tk):
             messagebox.showerror("Error", "Cannot rename the root directory.")
             return
 
+        self._save_editor_content_to_vfs()
+
         old_name = path[-1]
         parent_path = path[:-1]
         parent_node = self._get_file_node_reference(parent_path)
@@ -536,9 +795,15 @@ class WorldBuilderArchive(tk.Tk):
                 new_children[key] = val
         parent_node["children"] = new_children
 
-        # Update active file path if it was the renamed node
+        # Rewrite links pointing to the old path
+        old_path_str = self._get_path_string(path)
+        new_path_str = self._get_path_string(parent_path + [new_name])
+
+        # Update active file path if it was the renamed node (before refreshing editor)
         if self.active_file_path and self._get_path_string(self.active_file_path) == self._get_path_string(path):
             self.active_file_path = parent_path + [new_name]
+
+        self._rewrite_links(old_path_str, new_path_str)
 
         # Update open tabs for renamed node
         old_path_string = self._get_path_string(path)
@@ -550,6 +815,7 @@ class WorldBuilderArchive(tk.Tk):
             elif tab_str.startswith(old_path_string + "/"):
                 self._open_tabs[i] = parent_path + [new_name] + tab[len(path):]
         self._rebuild_tab_bar()
+        self._update_popped_out_paths(old_path_string, new_path_string)
 
         open_paths = self._get_open_paths()
         self._populate_vfs_tree()
@@ -636,6 +902,90 @@ class WorldBuilderArchive(tk.Tk):
             self.current_path = path_string.split('/')
             self.path_var.set(path_string)
 
+    # --- VFS Search ---
+
+    def _do_vfs_search(self):
+        """Filter the VFS tree to show only matching files and their parent folders."""
+        query = self._search_var.get().strip().lower()
+        if not query:
+            # Restore full tree
+            self._populate_vfs_tree()
+            return
+
+        mode = self._search_mode.get()
+        matching_paths = set()
+
+        def search_node(node, path_list):
+            name = path_list[-1]
+            if node.get("type") == "file":
+                match = False
+                if query in name.lower():
+                    match = True
+                elif mode == "Contents":
+                    content = node.get("content", "")
+                    try:
+                        data = json.loads(content)
+                        if isinstance(data, dict) and "text" in data:
+                            content = data["text"]
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    if query in content.lower():
+                        match = True
+                if match:
+                    # Add the file and all its ancestor folders
+                    for i in range(1, len(path_list) + 1):
+                        matching_paths.add(self._get_path_string(path_list[:i]))
+            elif node.get("type") == "dir":
+                if mode == "Names" and query in name.lower() and len(path_list) > 1:
+                    for i in range(1, len(path_list) + 1):
+                        matching_paths.add(self._get_path_string(path_list[:i]))
+                for child_name, child_node in node.get("children", {}).items():
+                    search_node(child_node, path_list + [child_name])
+
+        root = self.vfs.get(self.root_name)
+        if root:
+            search_node(root, [self.root_name])
+
+        # Rebuild tree showing only matching items
+        self._populate_vfs_tree_filtered(matching_paths)
+
+    def _populate_vfs_tree_filtered(self, matching_paths):
+        """Rebuild the tree showing only nodes whose path is in matching_paths."""
+        for item in self.vfs_tree.get_children():
+            self.vfs_tree.delete(item)
+
+        def insert_node(parent_id, node_name, node_data, path_list):
+            path_string = self._get_path_string(path_list)
+            if path_string not in matching_paths:
+                return
+            node_type = node_data.get("type", "dir")
+            icon = self.folder_icon if node_type == "dir" else self.file_icon
+
+            item_id = self.vfs_tree.insert(parent_id, 'end', text=node_name, image=icon, tags=("node",))
+            self.vfs_tree.item(item_id, values=(path_string,))
+
+            if node_type == "dir" and "children" in node_data:
+                for child_name, child_data in node_data["children"].items():
+                    insert_node(item_id, child_name, child_data, path_list + [child_name])
+
+            self.vfs_tree.item(item_id, open=True)
+
+        root_content = self.vfs.get(self.root_name)
+        if root_content:
+            root_path = self._get_path_string([self.root_name])
+            if root_path in matching_paths:
+                root_id = self.vfs_tree.insert('', 'end', text=self.root_name, image=self.folder_icon, tags=("node",))
+                self.vfs_tree.item(root_id, values=(root_path,))
+                if "children" in root_content:
+                    for child_name, child_data in root_content["children"].items():
+                        insert_node(root_id, child_name, child_data, [self.root_name, child_name])
+                self.vfs_tree.item(root_id, open=True)
+
+    def _clear_vfs_search(self):
+        """Clear the search bar and restore the full tree."""
+        self._search_var.set("")
+        self._search_entry.selection_clear()
+
     # --- UI Component Setup ---
         
     def _create_icons(self):
@@ -661,10 +1011,60 @@ class WorldBuilderArchive(tk.Tk):
         d.line([(5, 11), (10, 11)], fill=icon_color)
         self.file_icon = ImageTk.PhotoImage(file_img)
 
+    def _apply_theme(self, theme=None):
+        """Apply light or dark theme to the application."""
+        if theme is None:
+            config = self._load_config()
+            theme = config.get("theme", "light")
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+
+        if theme == "dark":
+            bg = "#2b2b2b"
+            fg = "#e0e0e0"
+            field_bg = "#3c3c3c"
+            select_bg = "#505050"
+            heading_bg = "#4a4a4a"
+            self.tk_setPalette(background=bg, foreground=fg,
+                              activeBackground=select_bg, activeForeground=fg,
+                              highlightBackground=bg, highlightColor=fg,
+                              selectBackground=select_bg, selectForeground=fg,
+                              insertBackground=fg)
+        else:
+            bg = "#f0f0f0"
+            fg = "#000000"
+            field_bg = "#ffffff"
+            select_bg = "#cde8ff"
+            heading_bg = "#d0d0d0"
+            self.tk_setPalette(background=bg, foreground=fg,
+                              activeBackground=select_bg, activeForeground=fg,
+                              highlightBackground=bg, highlightColor=fg,
+                              selectBackground=select_bg, selectForeground=fg,
+                              insertBackground=fg)
+
+        style.configure(".", background=bg, foreground=fg, fieldbackground=field_bg,
+                        troughcolor=field_bg, selectbackground=select_bg)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TLabelframe", background=bg, foreground=fg)
+        style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        style.configure("TButton", background=heading_bg, foreground=fg)
+        style.configure("TEntry", fieldbackground=field_bg, foreground=fg)
+        style.configure("TSpinbox", fieldbackground=field_bg, foreground=fg)
+        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure("Treeview", background=field_bg, foreground=fg, fieldbackground=field_bg)
+        style.configure("Treeview.Heading", background=heading_bg, foreground=fg)
+        style.configure("TPanedwindow", background=bg)
+        style.configure("TScrollbar", background=heading_bg, troughcolor=bg)
+        style.configure("TScale", background=bg, troughcolor=field_bg)
+        style.configure("TMenubutton", background=heading_bg, foreground=fg)
+        style.map("Treeview", background=[("selected", select_bg)],
+                  foreground=[("selected", fg)])
+        style.map("TButton", background=[("active", select_bg)])
+
     def _setup_layout(self):
         """Configures the main window layout."""
-        style = ttk.Style(self)
-        style.theme_use("clam") 
         
         # --- Top Bar with Gear Icon ---
         top_bar = ttk.Frame(self)
@@ -688,10 +1088,22 @@ class WorldBuilderArchive(tk.Tk):
         self.path_var = tk.StringVar(value=self._get_path_string(self.current_path))
         ttk.Label(self.left_frame, textvariable=self.path_var, font=('Helvetica', 10, 'bold'), anchor='w').pack(fill=tk.X, pady=(0, 5))
         
-        tree_frame = ttk.Frame(self.left_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Search bar
+        search_frame = ttk.Frame(self.left_frame)
+        search_frame.pack(fill=tk.X, pady=(0, 5))
+        self._search_mode = tk.StringVar(value="Names")
+        ttk.OptionMenu(search_frame, self._search_mode, "Names", "Names", "Contents").pack(side=tk.LEFT, padx=(0, 3))
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add('write', lambda *a: self._do_vfs_search())
+        self._search_mode.trace_add('write', lambda *a: self._do_vfs_search())
+        self._search_entry = ttk.Entry(search_frame, textvariable=self._search_var)
+        self._search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._search_entry.bind('<Escape>', lambda e: self._clear_vfs_search())
+
+        self._tree_frame = ttk.Frame(self.left_frame)
+        self._tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.vfs_tree = ttk.Treeview(tree_frame, columns=('path_string'), show='tree')
+        self.vfs_tree = ttk.Treeview(self._tree_frame, columns=('path_string'), show='tree')
         self.vfs_tree.column('#0', width=200, anchor='w')
         self.vfs_tree.heading('#0', text='Name')
         self.vfs_tree.column('path_string', width=0, stretch=tk.NO) 
@@ -708,7 +1120,7 @@ class WorldBuilderArchive(tk.Tk):
         self.vfs_tree.bind('<B1-Motion>', self._on_drag_motion)
         self.vfs_tree.bind('<ButtonRelease-1>', self._on_drag_drop)
         
-        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.vfs_tree.yview)
+        tree_scroll = ttk.Scrollbar(self._tree_frame, orient=tk.VERTICAL, command=self.vfs_tree.yview)
         self.vfs_tree.configure(yscrollcommand=tree_scroll.set)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
@@ -1111,6 +1523,8 @@ class WorldBuilderArchive(tk.Tk):
 
     def _move_node_to(self, src_path, dest_parent_path):
         """Move a node from src_path into dest_parent_path folder."""
+        self._save_editor_content_to_vfs()
+
         src_name = src_path[-1]
         src_parent = self._get_file_node_reference(src_path[:-1])
         dest_parent = self._get_file_node_reference(dest_parent_path)
@@ -1121,10 +1535,32 @@ class WorldBuilderArchive(tk.Tk):
             messagebox.showerror("Error", f"'{src_name}' already exists in the destination folder.")
             return
 
+        old_path_str = self._get_path_string(src_path)
         node = src_parent["children"].pop(src_name)
         if "children" not in dest_parent:
             dest_parent["children"] = {}
         dest_parent["children"][src_name] = node
+
+        # Update active file path and open tabs
+        new_path = dest_parent_path + [src_name]
+        new_path_str = self._get_path_string(new_path)
+        if self.active_file_path:
+            active_str = self._get_path_string(self.active_file_path)
+            if active_str == old_path_str:
+                self.active_file_path = new_path
+            elif active_str.startswith(old_path_str + "/"):
+                self.active_file_path = new_path + self.active_file_path[len(src_path):]
+        for i, tab in enumerate(self._open_tabs):
+            tab_str = self._get_path_string(tab)
+            if tab_str == old_path_str:
+                self._open_tabs[i] = new_path
+            elif tab_str.startswith(old_path_str + "/"):
+                self._open_tabs[i] = new_path + tab[len(src_path):]
+        self._rebuild_tab_bar()
+        self._update_popped_out_paths(old_path_str, new_path_str)
+
+        # Rewrite links pointing to the old path
+        self._rewrite_links(old_path_str, new_path_str)
 
     # --- VFS Action Dialogs (Folder, File, Delete) ---
 
@@ -1660,29 +2096,35 @@ class SettingsDialog(tk.Toplevel):
         size_frame.pack(fill=tk.X, pady=5)
         ttk.Label(size_frame, text="Default window size:").pack(side=tk.LEFT)
         self.size_var = tk.StringVar(value=config.get("window_size", "1200x800"))
-        ttk.Entry(size_frame, textvariable=self.size_var, width=12).pack(side=tk.LEFT, padx=10)
+        size_entry = ttk.Entry(size_frame, textvariable=self.size_var, width=12)
+        size_entry.pack(side=tk.LEFT, padx=10)
+        size_entry.bind('<FocusOut>', lambda e: self._auto_save())
+        size_entry.bind('<Return>', lambda e: self._auto_save())
         
         # Fullscreen
         self.fullscreen_var = tk.BooleanVar(value=config.get("fullscreen", False))
         ttk.Checkbutton(container, text="Launch in fullscreen", 
-                       variable=self.fullscreen_var).pack(anchor='w', pady=5)
+                       variable=self.fullscreen_var, command=self._auto_save).pack(anchor='w', pady=5)
 
         # Auto-collapse VFS
         self.auto_collapse_var = tk.BooleanVar(value=config.get("auto_collapse_vfs", False))
         ttk.Checkbutton(container, text="Auto-collapse file panel when opening a file",
-                       variable=self.auto_collapse_var).pack(anchor='w', pady=5)
+                       variable=self.auto_collapse_var, command=self._auto_save).pack(anchor='w', pady=5)
         
-        # Buttons
-        btn_frame = ttk.Frame(container)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(15, 0))
-        ttk.Button(btn_frame, text="Save", command=self._save).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+        # Theme
+        theme_frame = ttk.Frame(container)
+        theme_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(theme_frame, text="Theme:").pack(side=tk.LEFT)
+        self.theme_var = tk.StringVar(value=config.get("theme", "light"))
+        self.theme_var.trace_add('write', lambda *a: self._auto_save())
+        ttk.OptionMenu(theme_frame, self.theme_var, self.theme_var.get(), "light", "dark").pack(side=tk.LEFT, padx=10)
         
         self.bind('<Escape>', lambda e: self.destroy())
 
     def _select_reopen(self, value):
         self.reopen_var.set(value)
         self._update_reopen_buttons()
+        self._auto_save()
 
     def _update_reopen_buttons(self):
         selected = self.reopen_var.get()
@@ -1693,21 +2135,21 @@ class SettingsDialog(tk.Toplevel):
             else:
                 btn.state(['!pressed'])
 
-    def _save(self):
+    def _auto_save(self):
         config = self.parent._load_config()
         config["reopen_behavior"] = self.reopen_var.get()
         config["window_size"] = self.size_var.get()
         config["fullscreen"] = self.fullscreen_var.get()
         config["auto_collapse_vfs"] = self.auto_collapse_var.get()
+        config["theme"] = self.theme_var.get()
         try:
             with open(self.parent.CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception:
             pass
         
-        # Apply auto-collapse setting immediately
         self.parent._auto_collapse_vfs = self.auto_collapse_var.get()
-        self.destroy()
+        self.parent._apply_theme(self.theme_var.get())
 
 
 # --- Link Utilities ---
@@ -1829,15 +2271,32 @@ class TextEditor(ttk.Frame):
         self.text_widget.tag_configure('underline', underline=True)
         self.text_widget.tag_configure('strikethrough', overstrike=True)
         self.text_widget.tag_configure('link', foreground='#1565C0', underline=True)
+        self.text_widget.tag_configure('misspelled', underline=True, underlinefg='red')
         self.text_widget.tag_raise('bold_italic', 'bold')
         self.text_widget.tag_raise('bold_italic', 'italic')
         self.text_widget.tag_bind('link', '<Button-1>', self._on_link_click)
         self.text_widget.tag_bind('link', '<Enter>', lambda e: self.text_widget.config(cursor='hand2'))
         self.text_widget.tag_bind('link', '<Leave>', lambda e: self.text_widget.config(cursor=''))
         
+        # Spellcheck
+        try:
+            self._spell = SpellChecker()
+        except Exception:
+            self._spell = None
+        self._spellcheck_after_id = None
+        self._custom_dict_path = None
+        if self._spell and controller and controller.file_path:
+            base = os.path.splitext(controller.file_path)[0]
+            self._custom_dict_path = base + ".dict"
+            if os.path.isfile(self._custom_dict_path):
+                with open(self._custom_dict_path, 'r') as f:
+                    words = [w.strip() for w in f.readlines() if w.strip()]
+                    self._spell.word_frequency.load_words(words)
+        
         # Load content with markup
         self._load_markup(initial_content)
         self.text_widget.edit_reset()
+        self._schedule_spellcheck()
         
         # Keyboard shortcuts
         self.text_widget.bind('<Control-b>', lambda e: self._toggle_format_key('bold'))
@@ -1856,6 +2315,7 @@ class TextEditor(ttk.Frame):
         self.text_widget.bind('<Return>', self._on_enter)
         self.text_widget.bind('<KeyPress>', self._on_keypress)
         self.text_widget.bind('<Button-1>', self._on_click)
+        self.text_widget.bind('<KeyRelease>', self._on_key_release)
         self.text_widget.bind('<Tab>', self._on_tab)
         self.text_widget.bind('<BackSpace>', self._on_backspace)
             
@@ -1884,10 +2344,12 @@ class TextEditor(ttk.Frame):
                     break  # hit a shallower level, stop
                 # deeper indent: skip and keep looking
             else:
-                # non-numbered line — stop unless it's blank or a bullet (which breaks the sequence)
-                if prev_text.strip() == '' or re.match(r'^\s*• ', prev_text):
-                    break
-                break
+                # Non-numbered line: check indent level
+                prev_indent_m = re.match(r'^(\t*)', prev_text)
+                prev_indent_len = len(prev_indent_m.group(1)) if prev_indent_m else 0
+                if prev_indent_len <= indent_len:
+                    break  # same or shallower indent non-numbered line breaks the sequence
+                # deeper indent: skip over (sub-items like bullets)
         old_num = m.group(2)
         if str(count) != old_num:
             self.text_widget.delete(f"{line_num}.{indent_len}", f"{line_num}.{indent_len+len(old_num)}")
@@ -1931,6 +2393,14 @@ class TextEditor(ttk.Frame):
             self._active_formats = {t for t in ('bold', 'italic', 'underline') if t in tags}
             self._update_toolbar_state()
         self.text_widget.after(1, update)
+
+    def _on_cursor_move(self, event):
+        """Update toolbar state when cursor moves via arrow keys."""
+        if event.keysym in ('Left', 'Right', 'Up', 'Down', 'Home', 'End'):
+            idx = self.text_widget.index('insert-1c')
+            tags = self.text_widget.tag_names(idx)
+            self._active_formats = {t for t in ('bold', 'italic', 'underline') if t in tags}
+            self._update_toolbar_state()
 
     def _on_enter(self, event):
         """Continue bullet or numbered list prefix on new line, or remove prefix if line is empty."""
@@ -2017,13 +2487,20 @@ class TextEditor(ttk.Frame):
             elif tag == 'italic' and 'bold' in self.text_widget.tag_names(sel_start):
                 self.text_widget.tag_add('bold_italic', sel_start, sel_end)
 
+        # Update toolbar to reflect formatting at current position
+        tags = self.text_widget.tag_names(sel_start)
+        self._active_formats = {t for t in ('bold', 'italic', 'underline') if t in tags}
+        self._update_toolbar_state()
+
     def _update_toolbar_state(self):
         """Update toolbar button appearance to reflect active format state."""
+        style = ttk.Style()
+        style.configure("Active.TButton", background="#4a90d9", foreground="#ffffff")
         for tag, btn in getattr(self, '_format_buttons', {}).items():
             if tag in self._active_formats:
-                btn.state(['pressed'])
+                btn.configure(style="Active.TButton")
             else:
-                btn.state(['!pressed'])
+                btn.configure(style="TButton")
 
     def _on_keypress(self, event):
         """Apply active formats to typed characters."""
@@ -2067,6 +2544,8 @@ class TextEditor(ttk.Frame):
                 self.text_widget.delete("insert linestart", f"insert linestart+{len(indent)+len(m.group(1))+2}c")
             else:
                 self.text_widget.insert(f"insert linestart+{len(indent)}c", "1. ")
+                line_num = int(self.text_widget.index("insert").split('.')[0])
+                self._renumber_line(line_num)
 
     def _toggle_line_prefix(self, prefix, mode):
         """Add or remove line prefixes for lists, preserving formatting tags."""
@@ -2246,15 +2725,69 @@ class TextEditor(ttk.Frame):
             if first_pos:
                 self.text_widget.see(first_pos)
 
+    def _on_key_release(self, event):
+        """Handle key release: update toolbar and schedule spellcheck."""
+        self._on_cursor_move(event)
+        self._schedule_spellcheck()
+
+    def _schedule_spellcheck(self):
+        """Schedule spellcheck to run after 500ms of idle time."""
+        if self._spellcheck_after_id:
+            self.after_cancel(self._spellcheck_after_id)
+        self._spellcheck_after_id = self.after(500, self._run_spellcheck)
+
+    def _run_spellcheck(self):
+        """Check all words and apply misspelled tag to unknown ones."""
+        if not self._spell:
+            return
+        self.text_widget.tag_remove('misspelled', '1.0', tk.END)
+        text = self.text_widget.get('1.0', 'end-1c')
+        for m in re.finditer(r"[a-zA-Z']+", text):
+            word = m.group()
+            if word.strip("'") and self._spell.unknown([word.lower()]):
+                start = f"1.0+{m.start()}c"
+                end = f"1.0+{m.end()}c"
+                # Skip words inside link tags
+                if 'link' not in self.text_widget.tag_names(start):
+                    self.text_widget.tag_add('misspelled', start, end)
+
     def _text_right_click(self, event):
         """Right-click context menu for text editor."""
         idx = self.text_widget.index(f"@{event.x},{event.y}")
         menu = tk.Menu(self, tearoff=0)
+        # Spellcheck suggestions
+        if self._spell and 'misspelled' in self.text_widget.tag_names(idx):
+            r = self.text_widget.tag_prevrange('misspelled', f"{idx}+1c")
+            if r:
+                word = self.text_widget.get(r[0], r[1])
+                suggestions = self._spell.candidates(word.lower())
+                if suggestions:
+                    for s in list(suggestions)[:5]:
+                        menu.add_command(label=s, command=lambda s=s, start=r[0], end=r[1]: self._replace_word(start, end, s))
+                    menu.add_separator()
+                menu.add_command(label="Add to dictionary", command=lambda w=word.lower(): self._add_to_dict(w))
+                menu.add_separator()
         if 'link' in self.text_widget.tag_names(idx):
             menu.add_command(label="Remove Link", command=lambda: self._remove_link(idx))
             menu.add_separator()
         menu.add_command(label="Insert Link", command=self._insert_link)
         popup_menu(menu, event.x_root, event.y_root)
+
+    def _replace_word(self, start, end, replacement):
+        """Replace a misspelled word with the selected suggestion."""
+        self.text_widget.delete(start, end)
+        self.text_widget.insert(start, replacement)
+        self._schedule_spellcheck()
+
+    def _add_to_dict(self, word):
+        """Add a word to the spellchecker's known words and save to file."""
+        self._spell.word_frequency.load_words([word])
+        if not self._custom_dict_path and self.controller and self.controller.file_path:
+            self._custom_dict_path = os.path.splitext(self.controller.file_path)[0] + ".dict"
+        if self._custom_dict_path:
+            with open(self._custom_dict_path, 'a') as f:
+                f.write(word + '\n')
+        self._run_spellcheck()
 
     def _remove_link(self, idx):
         """Remove the link tag from the link at idx, keeping the display text."""
@@ -3670,7 +4203,7 @@ class TimelineEditor(ttk.Frame):
             "day_of_month": int(self.current_day_of_month.get())
         }
         
-        self.events_tree.tag_configure('highlighted', background='lightblue')
+        self.events_tree.tag_configure('highlighted', background='lightblue', foreground='black')
         
         # Recursively clear and check all tree items
         def process_tree_items(parent_id, events_list, id_prefix=""):
@@ -4881,8 +5414,8 @@ class ImageViewer(ttk.Frame):
             tip.wm_overrideredirect(True)
             tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
             lbl = tk.Label(tip, text="\n".join(lines), background="#ffffe0",
-                          relief="solid", borderwidth=1, font=('Helvetica', 9),
-                          justify=tk.LEFT, wraplength=250)
+                          foreground="#000000", relief="solid", borderwidth=1,
+                          font=('Helvetica', 9), justify=tk.LEFT, wraplength=250)
             lbl.pack()
             self._tooltip = tip
 
@@ -5358,22 +5891,40 @@ class CSVGrid(ttk.Frame):
         legend_frame = ttk.Frame(self.grid_container)
         legend_frame.pack(fill=tk.X, pady=(0, 5))
         
-        legend_text = "Hotkeys: Double-Click=Edit Cell | Del=Delete Row | Right-Click=Context Menu"
+        legend_text = "Hotkeys: Type=Edit Cell | Tab=Next Cell | Del=Clear Cell | Space=Toggle Checkbox | Arrow Keys=Navigate | Esc=Cancel Edit"
         ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
         
         tree_frame = ttk.Frame(self.grid_container)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.tree = ttk.Treeview(tree_frame, columns=self.header, show='headings')
+        self.tree = ttk.Treeview(tree_frame, columns=self.header, show='headings', selectmode='none')
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Cell selection state
+        self._selected_cell = None  # (item_id, col_index)
+        self._cell_highlight = None  # Deprecated, kept for safety
+        self._cell_borders = []  # Border frames for cell highlight
         
         # Configure treeview with visible grid lines
         # Using fieldbackground as the "grid line" color between rows
         style = ttk.Style()
-        style.configure("CSVGrid.Treeview", rowheight=26, 
-                       fieldbackground="#c0c0c0", borderwidth=1, relief="solid")
-        style.configure("CSVGrid.Treeview.Heading", relief="raised", borderwidth=2,
-                       font=('Helvetica', 9, 'bold'), background="#d0d0d0")
+        config = self.controller._load_config() if self.controller else {}
+        is_dark = config.get("theme", "light") == "dark"
+        if is_dark:
+            style.configure("CSVGrid.Treeview", rowheight=26,
+                           fieldbackground="#3c3c3c", borderwidth=1, relief="solid",
+                           foreground="#e0e0e0")
+            style.configure("CSVGrid.Treeview.Heading", relief="raised", borderwidth=2,
+                           font=('Helvetica', 9, 'bold'), background="#4a4a4a", foreground="#e0e0e0")
+            style.map("CSVGrid.Treeview.Heading",
+                     foreground=[("active", "#000000")],
+                     background=[("active", "#606060")])
+        else:
+            style.configure("CSVGrid.Treeview", rowheight=26,
+                           fieldbackground="#c0c0c0", borderwidth=1, relief="solid",
+                           foreground="#000000")
+            style.configure("CSVGrid.Treeview.Heading", relief="raised", borderwidth=2,
+                           font=('Helvetica', 9, 'bold'), background="#d0d0d0", foreground="#000000")
         self.tree.configure(style="CSVGrid.Treeview")
         
         for col in self.header:
@@ -5393,8 +5944,12 @@ class CSVGrid(ttk.Frame):
                 self.tree.column(col, anchor="center")
             
         # Row colors create visible horizontal separation against the gray fieldbackground
-        self.tree.tag_configure("evenrow", background="#ffffff")
-        self.tree.tag_configure("oddrow", background="#f4f4f4") 
+        if is_dark:
+            self.tree.tag_configure("evenrow", background="#3c3c3c", foreground="#e0e0e0")
+            self.tree.tag_configure("oddrow", background="#333333", foreground="#e0e0e0")
+        else:
+            self.tree.tag_configure("evenrow", background="#ffffff", foreground="#000000")
+            self.tree.tag_configure("oddrow", background="#f4f4f4", foreground="#000000")
 
         vscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vscroll.set)
@@ -5410,6 +5965,12 @@ class CSVGrid(ttk.Frame):
         self.tree.bind('<Tab>', self._on_tab_key)
         self.tree.bind('<Return>', self._on_enter_key)
         self.tree.bind('<ButtonRelease-1>', self._on_single_click)
+        self.tree.bind('<Up>', self._on_arrow_up)
+        self.tree.bind('<Down>', self._on_arrow_down)
+        self.tree.bind('<Left>', self._on_arrow_left)
+        self.tree.bind('<Right>', self._on_arrow_right)
+        self.tree.bind('<space>', self._on_spacebar)
+        self.tree.bind('<KeyPress>', self._on_keypress_capture)
         
         # Column header drag-and-drop
         self._col_drag_index = None
@@ -5678,6 +6239,8 @@ class CSVGrid(ttk.Frame):
         self._load_data_and_ui(updated_content)
 
     def _on_single_click(self, event):
+        if self.cell_editor and self.cell_editor.winfo_exists():
+            return
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
@@ -5688,12 +6251,178 @@ class CSVGrid(ttk.Frame):
         col_index = int(column_id.replace('#', '')) - 1
         if col_index < 0 or col_index >= len(self.header):
             return
+        
+        # Toggle checkbox if applicable (before highlight to avoid redraw glitch)
         current_values = list(self.tree.item(item_id, 'values'))
         current_value = current_values[col_index]
         if self._is_checkbox_value(current_value):
             new_value = self._toggle_checkbox(current_value)
             current_values[col_index] = self._get_checkbox_display(new_value)
             self.tree.item(item_id, values=current_values)
+            self.tree.update_idletasks()
+        
+        # Select this cell
+        self._select_cell(item_id, col_index)
+        
+        # Ensure tree has focus for keyboard navigation
+        self.tree.focus_set()
+
+    def _select_cell(self, item_id, col_index):
+        """Select a specific cell and show highlight overlay."""
+        self._selected_cell = (item_id, col_index)
+        self._update_cell_highlight()
+
+    def _update_cell_highlight(self):
+        """Draw a border around the selected cell without covering its content."""
+        # Remove old highlight borders
+        for border in getattr(self, '_cell_borders', []):
+            border.destroy()
+        self._cell_borders = []
+        
+        if not self._selected_cell:
+            return
+        
+        item_id, col_index = self._selected_cell
+        column_id = f"#{col_index + 1}"
+        bbox = self.tree.bbox(item_id, column_id)
+        if not bbox:
+            return
+        
+        x, y, w, h = bbox
+        color = "#1976D2"
+        thickness = 2
+        
+        # Top border
+        top = tk.Frame(self.tree, bg=color, height=thickness)
+        top.place(x=x, y=y, width=w, height=thickness)
+        # Bottom border
+        bot = tk.Frame(self.tree, bg=color, height=thickness)
+        bot.place(x=x, y=y + h - thickness, width=w, height=thickness)
+        # Left border
+        left = tk.Frame(self.tree, bg=color, width=thickness)
+        left.place(x=x, y=y, width=thickness, height=h)
+        # Right border
+        right = tk.Frame(self.tree, bg=color, width=thickness)
+        right.place(x=x + w - thickness, y=y, width=thickness, height=h)
+        
+        self._cell_borders = [top, bot, left, right]
+        
+        # Make borders click-through by forwarding events
+        for border in self._cell_borders:
+            border.bind('<Button-1>', self._border_click)
+            border.bind('<Double-1>', self._border_dblclick)
+            border.bind('<Button-3>', self._border_rightclick)
+
+    def _border_click(self, event):
+        """Forward click from border to the tree."""
+        # Get absolute position and find the cell
+        abs_x = event.widget.winfo_x() + event.x
+        abs_y = event.widget.winfo_y() + event.y
+        item = self.tree.identify_row(abs_y)
+        col = self.tree.identify_column(abs_x)
+        if item and col:
+            ci = int(col.replace('#', '')) - 1
+            if 0 <= ci < len(self.header):
+                self._select_cell(item, ci)
+                vals = list(self.tree.item(item, 'values'))
+                if self._is_checkbox_value(vals[ci]):
+                    vals[ci] = self._get_checkbox_display(self._toggle_checkbox(vals[ci]))
+                    self.tree.item(item, values=vals)
+
+    def _border_dblclick(self, event):
+        """Forward double-click from border to edit cell."""
+        abs_x = event.widget.winfo_x() + event.x
+        abs_y = event.widget.winfo_y() + event.y
+        item = self.tree.identify_row(abs_y)
+        col = self.tree.identify_column(abs_x)
+        if item and col:
+            ci = int(col.replace('#', '')) - 1
+            if 0 <= ci < len(self.header):
+                self._edit_cell(item, ci)
+
+    def _border_rightclick(self, event):
+        """Forward right-click from border."""
+        abs_x = event.widget.winfo_x() + event.x
+        abs_y = event.widget.winfo_y() + event.y
+        self.tree.event_generate('<ButtonRelease-3>', x=abs_x, y=abs_y)
+
+    def _on_arrow_up(self, event):
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        items = list(self.tree.get_children())
+        idx = items.index(item_id) if item_id in items else -1
+        if idx > 0:
+            self._select_cell(items[idx - 1], col_index)
+        return 'break'
+
+    def _on_arrow_down(self, event):
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        items = list(self.tree.get_children())
+        idx = items.index(item_id) if item_id in items else -1
+        if idx < len(items) - 1:
+            self._select_cell(items[idx + 1], col_index)
+        return 'break'
+
+    def _on_arrow_left(self, event):
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        if col_index > 0:
+            self._select_cell(item_id, col_index - 1)
+        return 'break'
+
+    def _on_arrow_right(self, event):
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        if col_index < len(self.header) - 1:
+            self._select_cell(item_id, col_index + 1)
+        return 'break'
+
+    def _on_spacebar(self, event):
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        vals = list(self.tree.item(item_id, 'values'))
+        if self._is_checkbox_value(vals[col_index]):
+            vals[col_index] = self._get_checkbox_display(self._toggle_checkbox(vals[col_index]))
+            self.tree.item(item_id, values=vals)
+        return 'break'
+
+    def _on_keypress_capture(self, event):
+        """Start editing the selected cell when a printable character is typed."""
+        try:
+            if not self._selected_cell or not event.char or len(event.char) != 1 or event.char < ' ':
+                return
+            # Block Ctrl and Alt combos cross-platform
+            if event.state & 0x4:  # Control on both platforms
+                return
+            if (event.state & 0x8) and sys.platform != 'win32':  # Alt on Linux
+                return
+            if (event.state & 0x20000) and sys.platform == 'win32':  # Alt on Windows
+                return
+            if event.keysym in ('space', 'Tab', 'Return', 'Delete', 'Escape',
+                                'Up', 'Down', 'Left', 'Right'):
+                return
+            item_id, col_index = self._selected_cell
+            vals = list(self.tree.item(item_id, 'values'))
+            if col_index < len(vals) and self._is_checkbox_value(vals[col_index]):
+                return
+            self._edit_cell(item_id, col_index, clear=True)
+            if self.cell_editor and self.cell_editor.winfo_exists():
+                self.cell_editor.delete(0, tk.END)
+                self.cell_editor.insert(0, event.char)
+                self.cell_editor.icursor(tk.END)
+            return 'break'
+        except Exception:
+            pass
+            self.cell_editor.delete(0, tk.END)
+            self.cell_editor.insert(0, event.char)
+            self.cell_editor.icursor(tk.END)
+        return 'break'
 
     def _on_right_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -5734,49 +6463,65 @@ class CSVGrid(ttk.Frame):
         if col_index < 0 or col_index >= len(self.header):
             return
 
+        # Clear highlight before placing editor
+        for b in getattr(self, '_cell_borders', []):
+            b.destroy()
+        self._cell_borders = []
+        self._selected_cell = (item_id, col_index)
+
         current_values = list(self.tree.item(item_id, 'values'))
         current_value = current_values[col_index]
 
-        bbox = self.tree.bbox(item_id, column_id)
-        if bbox:
-            x, y, width, height = bbox
-            
-            entry_var = tk.StringVar(value=current_value)
-            self.cell_editor = ttk.Entry(self.tree, textvariable=entry_var)
-            self.cell_editor.place(x=x, y=y, width=width, height=height)
-            self.cell_editor.focus_set()
+        if self._is_checkbox_value(current_value):
+            return
 
-            self.cell_editor.bind("<Return>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
-            self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
-            self.cell_editor.bind("<Tab>", lambda e: self._move_to_next_cell()) 
+        self._edit_cell(item_id, col_index)
 
     def _save_edit_and_focus_tree(self, item_id, col_index, new_value):
         self._save_edit(item_id, col_index, new_value)
-        # Force focus back to tree immediately
-        self.tree.focus_force()
-        self.tree.selection_set(item_id)
-        self.tree.focus(item_id)
+        self.tree.focus_set()
+        self._select_cell(item_id, col_index)
         return 'break'
 
+    def _cancel_edit(self):
+        """Cancel cell editing without saving changes."""
+        self._edit_cancelled = True
+        if self.cell_editor and self.cell_editor.winfo_exists():
+            self.cell_editor.destroy()
+        self.cell_editor = None
+        self.tree.focus_set()
+        if self._selected_cell:
+            self._update_cell_highlight()
+
     def _on_enter_key(self, event):
-        selection = self.tree.selection()
-        if selection:
-            self._edit_cell(selection[0], 0)
+        if self._selected_cell:
+            item_id, col_index = self._selected_cell
+            vals = list(self.tree.item(item_id, 'values'))
+            if col_index < len(vals) and self._is_checkbox_value(vals[col_index]):
+                return 'break'
+            self._edit_cell(item_id, col_index)
         return 'break'
 
     def _on_tab_key(self, event):
-        selection = self.tree.selection()
-        if selection:
-            self._move_to_next_cell()
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        items = list(self.tree.get_children())
+        if col_index + 1 < len(self.header):
+            self._select_cell(item_id, col_index + 1)
+        else:
+            idx = items.index(item_id) if item_id in items else -1
+            if idx + 1 < len(items):
+                self._select_cell(items[idx + 1], 0)
+            elif items:
+                self._select_cell(items[0], 0)
         return 'break'
 
     def _move_to_next_cell(self):
         if self.cell_editor and self.cell_editor.winfo_exists():
-            # Get current position from the editor's bindings
             current_item = None
             current_col = 0
             
-            # Find current position by checking editor placement
             for item in self.tree.get_children():
                 for col in range(len(self.header)):
                     column_id = f"#{col + 1}"
@@ -5788,32 +6533,43 @@ class CSVGrid(ttk.Frame):
                 if current_item:
                     break
             
-            # Save current edit first
+            # Save current edit
             self.cell_editor.event_generate('<FocusOut>')
             
             if current_item:
-                # Move to next column
+                items = list(self.tree.get_children())
                 if current_col + 1 < len(self.header):
-                    # Next column in same row
-                    self._edit_cell(current_item, current_col + 1)
+                    self._select_cell(current_item, current_col + 1)
                 else:
-                    # Wrap to first column of next row
-                    items = self.tree.get_children()
-                    current_index = items.index(current_item)
-                    if current_index + 1 < len(items):
-                        next_item = items[current_index + 1]
-                        self._edit_cell(next_item, 0)
-                    else:
-                        # Wrap to first row, first column
-                        if items:
-                            self._edit_cell(items[0], 0)
+                    idx = items.index(current_item) if current_item in items else -1
+                    if idx + 1 < len(items):
+                        self._select_cell(items[idx + 1], 0)
+                    elif items:
+                        self._select_cell(items[0], 0)
 
-    def _edit_cell(self, item_id, col_index):
+    def _edit_cell(self, item_id, col_index, clear=False):
         if col_index >= len(self.header):
             return
+        
+        # If there's already an active editor, save it first
+        if self.cell_editor and self.cell_editor.winfo_exists():
+            self._saving_edit = True
+            entry_val = self.cell_editor.get()
+            old_cell = self._selected_cell
+            self.cell_editor.destroy()
+            self.cell_editor = None
+            if old_cell:
+                self._do_save_edit(old_cell[0], old_cell[1], entry_val)
+            self._saving_edit = False
+
+        # Clear highlight before placing editor
+        for b in getattr(self, '_cell_borders', []):
+            b.destroy()
+        self._cell_borders = []
+        self._selected_cell = (item_id, col_index)
             
         current_values = list(self.tree.item(item_id, 'values'))
-        current_value = current_values[col_index] if col_index < len(current_values) else ""
+        current_value = "" if clear else (current_values[col_index] if col_index < len(current_values) else "")
         
         column_id = f"#{col_index + 1}"
         bbox = self.tree.bbox(item_id, column_id)
@@ -5821,17 +6577,46 @@ class CSVGrid(ttk.Frame):
             x, y, width, height = bbox
             
             entry_var = tk.StringVar(value=current_value)
-            self.cell_editor = ttk.Entry(self.tree, textvariable=entry_var)
+            self.cell_editor = tk.Entry(self.tree, textvariable=entry_var,
+                                        selectbackground="#cde8ff", selectforeground="#000000")
             self.cell_editor.place(x=x, y=y, width=width, height=height)
+            self._edit_ready = False
             self.cell_editor.focus_set()
-            self.cell_editor.select_range(0, tk.END)
+            if not clear:
+                self.cell_editor.select_range(0, tk.END)
 
             self.cell_editor.bind("<Return>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
+            self.cell_editor.bind("<Escape>", lambda e: self._cancel_edit())
             self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
             self.cell_editor.bind("<Tab>", lambda e: self._move_to_next_cell())
+            # Mark editor as ready after event loop settles
+            self.after(50, self._mark_edit_ready)
+
+    def _mark_edit_ready(self):
+        self._edit_ready = True
+
+    def _do_save_edit(self, item_id, col_index, new_value):
+        """Save cell value without destroying editor (used internally)."""
+        try:
+            current_values_list = list(self.tree.item(item_id, 'values'))
+            if 0 <= col_index < len(current_values_list):
+                current_values_list[col_index] = new_value
+                self.tree.item(item_id, values=current_values_list)
+                row_index = self.tree.index(item_id)
+                if row_index < len(self.rows) and col_index < len(self.rows[row_index]):
+                    raw = self.rows[row_index][col_index]
+                    if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
+                        self.rows[row_index][col_index] = new_value
+        except Exception:
+            pass
 
     def _save_edit(self, item_id, col_index, new_value):
         if not self.cell_editor: return
+        if getattr(self, '_saving_edit', False): return
+        if not getattr(self, '_edit_ready', True): return
+        if getattr(self, '_edit_cancelled', False):
+            self._edit_cancelled = False
+            return
             
         try:
             current_values_list = list(self.tree.item(item_id, 'values'))
@@ -5840,12 +6625,20 @@ class CSVGrid(ttk.Frame):
                 current_values_list[col_index] = new_value
                 self.tree.item(item_id, values=current_values_list)
 
-                # If the cell had a link and the ⇗ was removed, clear link in raw data
+                # Update self.rows to stay in sync
                 row_index = self.tree.index(item_id)
-                if row_index < len(self.rows) and col_index < len(self.rows[row_index]):
-                    raw = self.rows[row_index][col_index]
-                    if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
-                        self.rows[row_index][col_index] = new_value
+                # Ensure self.rows has enough entries
+                while len(self.rows) <= row_index:
+                    self.rows.append([""] * len(self.header))
+                while len(self.rows[row_index]) <= col_index:
+                    self.rows[row_index].append("")
+                raw = self.rows[row_index][col_index]
+                if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
+                    # Link was removed, store plain text
+                    self.rows[row_index][col_index] = new_value
+                elif not LINK_REGEX.match(str(raw).strip()):
+                    # Non-link cell, always sync
+                    self.rows[row_index][col_index] = new_value
 
             # Auto-add blank row if last row now has non-checkbox content
             all_items = self.tree.get_children()
@@ -5864,10 +6657,9 @@ class CSVGrid(ttk.Frame):
             if self.cell_editor and self.cell_editor.winfo_exists():
                 self.cell_editor.destroy()
             self.cell_editor = None
-            # Always return focus to tree after editing
-            self.tree.focus_force()
-            self.tree.selection_set(item_id)
-            self.tree.focus(item_id)
+            # Restore focus and cell highlight
+            self.tree.focus_set()
+            self._select_cell(item_id, col_index)
 
     def _show_row_menu(self, event, item_id, col_index=0):
         """Show context menu for row operations."""
@@ -6014,23 +6806,17 @@ class CSVGrid(ttk.Frame):
                 self._load_data_and_ui(updated_content)
 
     def _on_delete_key(self, event):
-        selection = self.tree.selection()
-        if not selection:
-            return
-            
-        if not messagebox.askyesno("Confirm Delete", "Delete selected row?"):
-            return
-            
-        # Get row index and remove from data
-        item = selection[0]
-        row_index = self.tree.index(item)
-        
-        if row_index < len(self.rows):
-            del self.rows[row_index]
-            full_data = [self.header] + self.rows
-            updated_content = self._list_to_csv(full_data)
-            self._load_data_and_ui(updated_content)
-
+        if not self._selected_cell:
+            return 'break'
+        item_id, col_index = self._selected_cell
+        current_values = list(self.tree.item(item_id, 'values'))
+        if col_index < len(current_values):
+            if self._is_checkbox_value(current_values[col_index]):
+                current_values[col_index] = "☐"
+            else:
+                current_values[col_index] = ""
+            self.tree.item(item_id, values=current_values)
+        return 'break'
 
     def _get_checkbox_columns(self):
         """Returns set of column indices that are checkbox columns."""
@@ -6116,6 +6902,27 @@ class CSVGrid(ttk.Frame):
         if not hasattr(self, 'tree') or not self.tree.winfo_exists():
              return ""
 
+        # Flush any active cell editor before reading
+        if self.cell_editor and self.cell_editor.winfo_exists():
+            self._edit_ready = True
+            val = self.cell_editor.get()
+            if self._selected_cell:
+                item_id, col_index = self._selected_cell
+                current_values = list(self.tree.item(item_id, 'values'))
+                if col_index < len(current_values):
+                    current_values[col_index] = val
+                    self.tree.item(item_id, values=current_values)
+                    row_index = self.tree.index(item_id)
+                    while len(self.rows) <= row_index:
+                        self.rows.append([""] * len(self.header))
+                    while len(self.rows[row_index]) <= col_index:
+                        self.rows[row_index].append("")
+                    raw = self.rows[row_index][col_index]
+                    if LINK_REGEX.match(str(raw).strip()) and not val.startswith("⇗ "):
+                        self.rows[row_index][col_index] = val
+                    elif not LINK_REGEX.match(str(raw).strip()):
+                        self.rows[row_index][col_index] = val
+
         all_rows_data = []
         for row_idx, item_id in enumerate(self.tree.get_children()):
             row = []
@@ -6126,8 +6933,15 @@ class CSVGrid(ttk.Frame):
                 elif s == "☐":
                     row.append("FALSE")
                 elif s.startswith("⇗ ") and row_idx < len(self.rows) and col_idx < len(self.rows[row_idx]):
-                    # Use raw link data from self.rows
-                    row.append(self.rows[row_idx][col_idx])
+                    # Use raw link data from self.rows, but update display if changed
+                    raw = self.rows[row_idx][col_idx]
+                    m = LINK_REGEX.match(str(raw).strip())
+                    if m:
+                        path = m.group(1)
+                        new_display = s[2:]  # strip "⇗ " prefix
+                        row.append(f"[[{path}|{new_display}]]")
+                    else:
+                        row.append(raw)
                 else:
                     row.append(s)
             all_rows_data.append(row)
