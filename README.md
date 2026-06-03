@@ -15,7 +15,7 @@ Made for **Windows** and **Linux**.
 
 <br>
 
-[⬇ Download for Windows](https://github.com/milespm/Storyboard/releases)
+[⬇ Download for Windows](https://github.com/patman124/Storyboard/releases/tag/python)
 
 </div>
 
