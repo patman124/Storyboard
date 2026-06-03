@@ -135,6 +135,9 @@ class WorldBuilderArchive(tk.Tk):
 
     def _save_config(self, filepath):
         config = self._load_config()
+        home = os.path.expanduser("~")
+        if os.path.normcase(filepath).startswith(os.path.normcase(home)):
+            filepath = "~" + filepath[len(home):]
         config["last_opened_file"] = filepath
         try:
             with open(self.CONFIG_FILE, 'w') as f:
@@ -158,6 +161,8 @@ class WorldBuilderArchive(tk.Tk):
         if behavior == "never":
             return
         last_file = config.get("last_opened_file", "")
+        if last_file:
+            last_file = os.path.expanduser(last_file)
         if last_file and os.path.isfile(last_file):
             if behavior == "always":
                 self._load_file(last_file)
