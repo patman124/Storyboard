@@ -102,7 +102,7 @@ Pin notes to maps. Annotate character art. Label diagrams. All without leaving t
 
 Every file can link to every other file. Your world becomes a connected web, not a pile of documents.
 
-- `[[path/to/file|Display Text]]` syntax works everywhere — text, tables, timeline events, image pins
+- `[[path/to/file|Display Text]]` syntax works everywhere — text, tables, timeline events, image pins and labels
 - **Click any link** to jump directly to the target file
 - **Links auto-update** when you rename or move files — nothing breaks
 - **Right-click → Insert Link** opens a visual file picker so you never have to type paths manually
