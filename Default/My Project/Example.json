@@ -1,0 +1,26 @@
+{
+    "type": "dir",
+    "children": {
+        "Folder1": {
+            "type": "dir",
+            "children": {
+                "text.txt": {
+                    "type": "file",
+                    "content": "{\"text\": \"1. Hyperlinks\\n2. Bold\\n3. Italics\\n4. Underline\\n5. Strikeout\\n\\n\\nConsecutive lines keep the count\\n1. while broken likes\\n\\t1. or indents\\n\\t2. start a new count\\n2. And outdents continue the original count \\n3. for smoother numbered list creations\\n\\n\\u2022 Bullet point lists\\n\\u2022 also work\\n\\t\\u2022 when you indent and\\n\\u2022 continue when you outdent too\\n\\n\\nRight click and select insert link to link to other virtual files Image.image\\nOr highlight existing text and turn it into a hyperlink\\n\\n\\nTabs\\nTabs open for each document you open in Storyboard allowing you to quickly access multiple documents. Click on them to switch between files.\\n\\nWant more than one open at once? Right click on a tab and choose Pop Out. \\nThis will move the document view to a secondary window so you can view multiple at once.\\n\\nClose Tabs by right clicking on a tab and select close or keep only one tab open by selecting close other.\\n\\nAll changes to files cache automatically so you can change between files, only permanently saving changes when you hit the save button.\", \"tags\": [{\"tag\": \"bold\", \"start\": 17, \"end\": 21}, {\"tag\": \"bold\", \"start\": 465, \"end\": 469}, {\"tag\": \"italic\", \"start\": 25, \"end\": 32}, {\"tag\": \"italic\", \"start\": 677, \"end\": 684}, {\"tag\": \"underline\", \"start\": 36, \"end\": 45}, {\"tag\": \"underline\", \"start\": 465, \"end\": 469}, {\"tag\": \"strikethrough\", \"start\": 49, \"end\": 58}, {\"tag\": \"link\", \"start\": 3, \"end\": 13, \"path\": \"Example/Folder1/timeline.timeline\"}, {\"tag\": \"link\", \"start\": 395, \"end\": 406, \"path\": \"Example/Folder1/Image.image\"}, {\"tag\": \"link\", \"start\": 453, \"end\": 462, \"path\": \"Example/Folder1/table.table\"}]}"
+                },
+                "table.table": {
+                    "type": "file",
+                    "content": "A,B\nA1,B1\nA2,B2"
+                },
+                "timeline.timeline": {
+                    "type": "file",
+                    "content": "{\n    \"time_units\": {\n        \"ages\": {\n            \"count\": 10,\n            \"names\": {},\n            \"years_per_age\": {}\n        },\n        \"years\": {\n            \"count\": 100,\n            \"names\": {}\n        },\n        \"months\": {\n            \"count\": 12,\n            \"names\": {}\n        },\n        \"days_of_month\": {\n            \"count\": 30,\n            \"names\": {}\n        },\n        \"days_of_week\": {\n            \"count\": 7,\n            \"names\": {}\n        }\n    },\n    \"bc_ad_enabled\": false,\n    \"bc_label\": \"BC\",\n    \"ad_label\": \"AD\",\n    \"day_week_offset\": 0,\n    \"visible_units\": {\n        \"ages\": true,\n        \"years\": true,\n        \"months\": true,\n        \"days_of_week\": true,\n        \"days_of_month\": true\n    },\n    \"events\": [\n        {\n            \"name\": \"Event\",\n            \"description\": \"\",\n            \"start_time\": {\n                \"age\": 1,\n                \"year\": 1,\n                \"month\": 1,\n                \"day_of_month\": 1,\n                \"day_of_week\": 1\n            }\n        }\n    ]\n}"
+                },
+                "Image.image": {
+                    "type": "file",
+                    "content": "{\"path\": \"logo folder\\\\logo.png\", \"markers\": [], \"labels\": []}"
+                }
+            }
+        }
+    }
+}
