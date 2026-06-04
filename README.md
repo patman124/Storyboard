@@ -132,7 +132,7 @@ Every file can link to every other file. Your world becomes a connected web, not
 
 ## Getting Started
 
-Grab the `.exe` from [Releases](https://github.com/patman124/Storyboard/releases/tag/python)) and run it. No install required.
+Grab the `win_storyboard .zip` from [Releases](https://github.com/patman124/Storyboard/releases/tag/python)), extract the zip file and run the exe. No install required.
 
 1. Launch Storyboard
 2. **Save As** to create your world file, or **Load** an existing `.json`
@@ -197,7 +197,7 @@ Storyboard/
 Your world (saved anywhere)/
 ├── MyWorld.json            ← Entire world in one portable file
 ├── MyWorld.dict            ← Custom spellcheck dictionary
-└── images/                 ← Referenced images (relative paths)
+└── images/                 ← Recommended to keep images for your world in the same folder (paths are relative)
 ```
 
 ---
@@ -220,12 +220,15 @@ python storyboard.py
 
 **To compile a standalone `.exe`:**
 
-```bash
-pip install pyinstaller
-pyinstaller storyboard.spec
+Windows
 ```
-
-Output goes to `dist/`. The `.spec` file bundles the icon and all dependencies.
+pyinstaller --onedir --windowed --icon=logo.ico --add-data "logo.ico;." --add-data "icon.png;." --collect-data spellchecker storyboard.py
+```
+Linux
+```
+pyinstaller --onedir --windowed --add-data "logo.ico:." --add-data "icon.png:." --collect-data spellchecker storyboard.py
+```
+Output goes to `dist/`.
 
 </details>
 
