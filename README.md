@@ -56,7 +56,7 @@ Track characters, items, factions, locations — anything that fits a grid.
 
 - Spreadsheet-style CSV grid with header row
 - Full **keyboard navigation** — arrow keys, Tab between cells, Escape to cancel
-- **Checkbox cells** — type TRUE/FALSE or toggle with Space
+- **Checkbox cells** — toggle with a click or Spacebar
 - **Internal links** work inside cells
 - Auto-expanding rows — always a blank row ready at the bottom
 - In-editor hotkey legend so you never have to guess
