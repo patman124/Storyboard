@@ -132,7 +132,7 @@ Every file can link to every other file. Your world becomes a connected web, not
 
 ## Getting Started
 
-Grab the `.exe` from [Releases](https://github.com/milespm/Storyboard/releases) and run it. No install required.
+Grab the `.exe` from [Releases](https://github.com/patman124/Storyboard/releases/tag/python)) and run it. No install required.
 
 1. Launch Storyboard
 2. **Save As** to create your world file, or **Load** an existing `.json`
