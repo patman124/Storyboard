@@ -7,7 +7,7 @@
 **Your entire world in one file.**
 
 A desktop worldbuilding app for writers, game designers, and tabletop creators.  
-Lore, timelines, maps, and notes — all in a single portable project.
+Lore, timelines, maps, graphs, and notes — all in a single portable project.
 
 No cloud. No accounts. No internet. Just your world.
 
@@ -27,9 +27,10 @@ Made for **Windows** and **Linux**.
 
 Everything lives in one `.json` file — a full hierarchy of folders and documents that you organize however makes sense for your world.
 
-- **Four document types** — Text, Tables, Timelines, and Image Viewers
+- **Five document types** — Text, Tables, Timelines, Image Viewers, and Graphs
 - **Drag-and-drop** to reorder files and folders freely
 - **Search** by file name or by content across every document
+- **Bookmarks** — star your most-used files for instant access from the ★ menu
 - **Duplicate, rename, copy, move, and delete** — with confirmation safeguards so you don't lose work
 - **Unsaved change detection** — you'll always get prompted before anything gets discarded
 - **Save As** automatically offers to copy your custom dictionary and all linked images to the new location
@@ -58,6 +59,7 @@ Track characters, items, factions, locations — anything that fits a grid.
 - Full **keyboard navigation** — arrow keys, Tab between cells, Escape to cancel
 - **Checkbox cells** — toggle with a click or Spacebar
 - **Internal links** work inside cells
+- **Drag-and-drop columns and rows** to reorder
 - Auto-expanding rows — always a blank row ready at the bottom
 - In-editor hotkey legend so you never have to guess
 
@@ -72,12 +74,46 @@ Design your world's calendar from scratch. Define how time works, then fill it w
 - **Per-age year counts** — the First Age can span 3000 years while the Second Age lasts 500
 - **BC/AD-style epochal dating** with customizable era labels (call them whatever fits your world)
 - **Master timeline scrubber** — one slider that moves across your entire world history at once
-- **Individual unit scrubbers** with mouse wheel support for fine control
+- **Individual unit scrubbers** with mouse wheel support, integer snapping, and current value display
 - **Events** with start dates, end dates, descriptions, and embedded links
 - **Hierarchical sub-events** that auto-nest inside parent date ranges
 - **Live event highlighting** — events light up in the list when the scrubber hits their date
 - **Calculated day-of-week** from cumulative day count with configurable offset
 - **Day naming exclusion** — name your days of the week OR days of the month (not both, to avoid conflicts)
+- **Position memory** — each timeline remembers where you left off
+
+### 📈 Visual Timeline
+
+Toggle to a **graphical Gantt-style view** of your world's history:
+
+- Events rendered as **colored bars** (duration events) or **diamond markers** (point events)
+- **Lane-based stacking** — overlapping events stack vertically so nothing is hidden
+- **Gold time indicator** shows the current scrubber position
+- **Scroll to navigate** through time — mouse wheel pans the view
+- **Precision mode** (spacebar toggle) — scroll one day at a time for fine navigation
+- **Click any event** to jump the scrubbers to that date
+- **Right-click** for the same context menu as the list view
+- **Hover tooltips** show event name, date range, and description
+- View preference **saved per file** — it remembers whether you prefer list or visual
+
+### 🔁 Recurring Events
+
+Holidays, festivals, market days — events that repeat on a schedule.
+
+- **Three recurrence types:**
+  - **Yearly** — every N years in a specific month (e.g., "Harvest Festival, month 9, every year")
+  - **Monthly** — every N months (e.g., "Full moon market, every 3 months")
+  - **Interval** — every N days from a start date (e.g., "Patrol rotation every 14 days")
+- **Two day rules:**
+  - **Specific day** — "On day 15 of the month"
+  - **Nth weekday** — "The last Thursday of the month" (1st, 2nd, 3rd, 4th, or last)
+- **Multi-day duration** — a 5-day festival shows as a bar, not just a dot
+- **Active period** — set when a recurring event starts and ends (required, to prevent performance issues)
+- **Gold ★ indicator** in the time navigator when the current date is a recurring event
+- **Always visible** in the event list with highlight on matching dates
+- **Rendered on the visual timeline** as gold markers with lane stacking
+- **Links in descriptions** — right-click to insert links to other files in your project
+- **Occurrence count validation** — warns you before creating thousands of events that would slow things down
 
 ---
 
@@ -98,14 +134,43 @@ Pin notes to maps. Annotate character art. Label diagrams. All without leaving t
 
 ---
 
+## 🕸️ Graph Editor
+
+Map relationships, family trees, faction webs, and flowcharts with a node-and-edge canvas.
+
+- **Nodes** with customizable shapes — circle, rectangle, diamond, hexagon, triangle, star, octagon, pill, or custom image
+- **Edges** — directed, undirected, or bidirectional, with labels and descriptions
+- **Color-coded groups** — assign nodes to groups that auto-color and label
+- **Junction nodes** — add bends to edges by Ctrl+clicking on a connection
+- **Zoom, pan, and fit-to-view** — middle-click drag to pan, scroll to zoom
+- **Multi-select and align** — box-select nodes, then align horizontally or vertically
+- **Undo/redo** with full state history
+- **Copy/paste nodes** for quick duplication
+- **Node images** — use character portraits or icons as node shapes
+- **Hover tooltips** on nodes and edges for descriptions
+- **Links** — attach any node to a file in your project, click to navigate
+
+---
+
 ## 🔗 Internal Linking
 
 Every file can link to every other file. Your world becomes a connected web, not a pile of documents.
 
-- `[[path/to/file|Display Text]]` syntax works everywhere — text, tables, timeline events, image pins and labels
+- `[[path/to/file|Display Text]]` syntax works everywhere — text, tables, timeline events, image pins, labels, graphs, and recurring events
 - **Click any link** to jump directly to the target file
 - **Links auto-update** when you rename or move files — nothing breaks
 - **Right-click → Insert Link** opens a visual file picker so you never have to type paths manually
+
+---
+
+## ⭐ Bookmarks
+
+Quick access to your most-used files.
+
+- **★ toggle** on the right side of the tab bar — one click to bookmark the current file
+- **★ menu** in the top bar — click to see all bookmarks and jump to any of them instantly
+- **Right-click any file** in the tree → Add/Remove Bookmark
+- Bookmarks are **per-world-file** — each project has its own favorites
 
 ---
 
@@ -132,7 +197,7 @@ Every file can link to every other file. Your world becomes a connected web, not
 
 ## Getting Started
 
-Grab the `win_storyboard .zip` from [Releases](https://github.com/patman124/Storyboard/releases/tag/python)), extract the zip file and run the exe. No install required.
+Grab the `win_storyboard .zip` from [Releases](https://github.com/patman124/Storyboard/releases/tag/python), extract the zip file and run the exe. No install required.
 
 1. Launch Storyboard
 2. **Save As** to create your world file, or **Load** an existing `.json`
@@ -168,6 +233,7 @@ Grab the `win_storyboard .zip` from [Releases](https://github.com/patman124/Stor
 | `Shift+Enter` | New event |
 | `Delete` | Remove event |
 | `Arrow keys` | Navigate events |
+| `Space` | Toggle precision scroll (visual view) |
 
 </details>
 
@@ -181,6 +247,20 @@ Grab the `win_storyboard .zip` from [Releases](https://github.com/patman124/Stor
 | `Space` | Toggle checkbox |
 | `Del` | Clear cell |
 | `Esc` | Cancel edit |
+
+</details>
+
+<details>
+<summary><strong>Graph</strong></summary>
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+Click` | Start/complete connection |
+| `Shift+Drag` | Move selected nodes |
+| `Ctrl+Z / Y` | Undo / Redo |
+| `Ctrl+C / V` | Copy / Paste nodes |
+| `Delete` | Remove selected nodes |
+| `Escape` | Cancel connection |
 
 </details>
 
