@@ -17,6 +17,21 @@ def resource_path(relative_path):
     return os.path.join(base, relative_path)
 
 
+def set_window_icon(window):
+    """Set window icon for all windows. Call on root with default=True to apply globally."""
+    try:
+        if sys.platform == 'win32':
+            window.iconbitmap(default=resource_path("logo.ico"))
+        else:
+            from PIL import Image, ImageTk
+            img = Image.open(resource_path("logo.png"))
+            photo = ImageTk.PhotoImage(img)
+            window._icon_photo = photo  # prevent GC
+            window.iconphoto(True, photo)
+    except Exception:
+        pass
+
+
 # --- Global Chronology Parsing Utilities ---
 
 CHRON_LABEL_REGEX = re.compile(r"^\s*(\d+)(?:-(\d+))?(?:-(\d+))?(?:-(\d+))?\s*$")
@@ -90,16 +105,14 @@ class WorldBuilderArchive(tk.Tk):
         "Text Document": ".txt",
         "Table (.table)": ".table",
         "Chronological Timeline": ".timeline",
-        "Image Viewer": ".image"
+        "Image Viewer": ".image",
+        "Graph (.graph)": ".graph"
     }
 
     def __init__(self):
         super().__init__()
         self.title("Storyboard") 
-        try:
-            self.iconbitmap(resource_path("logo.ico"))
-        except tk.TclError:
-            pass
+        set_window_icon(self)
         self.geometry("1200x800")
         
         # --- Application State Management ---
@@ -246,6 +259,85 @@ class WorldBuilderArchive(tk.Tk):
     def _open_settings(self):
         """Open the settings dialog."""
         SettingsDialog(self)
+
+    def _get_bookmarks(self):
+        """Get bookmarks list for the current world file."""
+        if not self.file_path:
+            return []
+        config = self._load_config()
+        bookmarks = config.get("bookmarks", {})
+        return bookmarks.get(self.file_path, [])
+
+    def _save_bookmarks(self, bookmark_list):
+        """Save bookmarks for the current world file."""
+        if not self.file_path:
+            return
+        config = self._load_config()
+        if "bookmarks" not in config:
+            config["bookmarks"] = {}
+        config["bookmarks"][self.file_path] = bookmark_list
+        try:
+            with open(self.CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception:
+            pass
+
+    def _add_bookmark(self, path_string):
+        """Add a file path to bookmarks."""
+        bookmarks = self._get_bookmarks()
+        if path_string not in bookmarks:
+            bookmarks.append(path_string)
+            self._save_bookmarks(bookmarks)
+
+    def _remove_bookmark(self, path_string):
+        """Remove a file path from bookmarks."""
+        bookmarks = self._get_bookmarks()
+        if path_string in bookmarks:
+            bookmarks.remove(path_string)
+            self._save_bookmarks(bookmarks)
+
+    def _toggle_bookmark(self, path_string):
+        """Toggle bookmark for a file and refresh bookmark button."""
+        bookmarks = self._get_bookmarks()
+        if path_string in bookmarks:
+            bookmarks.remove(path_string)
+        else:
+            bookmarks.append(path_string)
+        self._save_bookmarks(bookmarks)
+        self._update_bookmark_button()
+
+    def _update_bookmark_button(self):
+        """Show/update the bookmark toggle button on the right side of the tab bar."""
+        # Remove old bookmark button if exists
+        if hasattr(self, '_bookmark_btn') and self._bookmark_btn:
+            self._bookmark_btn.destroy()
+            self._bookmark_btn = None
+        if self.active_file_path:
+            ps = self._get_path_string(self.active_file_path)
+            is_bookmarked = ps in self._get_bookmarks()
+            star = "★" if is_bookmarked else "☆"
+            self._bookmark_btn = ttk.Button(self._tab_bar, text=star, width=2,
+                                           command=lambda: self._toggle_bookmark(ps))
+            self._bookmark_btn.pack(side=tk.RIGHT, padx=3)
+
+    def _show_bookmarks(self):
+        """Show bookmarks dropdown menu."""
+        bookmarks = self._get_bookmarks()
+        menu = tk.Menu(self, tearoff=0)
+        if not bookmarks:
+            menu.add_command(label="(No bookmarks)", state="disabled")
+        else:
+            for path_str in bookmarks:
+                name = path_str.split('/')[-1]
+                menu.add_command(label=f"★ {name}",
+                               command=lambda p=path_str: self._open_file_editor(p.split('/')))
+        # Position below the bookmarks button
+        menu.tk_popup(self.winfo_rootx() + 120, self.winfo_rooty() + 30)
+
+    def _clear_bookmarks(self):
+        """Clear all bookmarks."""
+        if messagebox.askyesno("Clear Bookmarks", "Remove all bookmarks?"):
+            self._save_bookmarks([])
 
     def _write_vfs_to_disk(self, filepath):
         """Serializes and writes the current VFS state to the predefined JSON file on disk."""
@@ -504,6 +596,8 @@ class WorldBuilderArchive(tk.Tk):
             self.active_editor = TimelineEditor(editor_frame, content, controller=self)
         elif file_name.lower().endswith('.image'):
             self.active_editor = ImageViewer(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.graph'):
+            self.active_editor = GraphEditor(editor_frame, content, controller=self)
         else:
             self.active_editor = TextEditor(editor_frame, content, controller=self)
 
@@ -1076,6 +1170,7 @@ class WorldBuilderArchive(tk.Tk):
         top_bar.pack(fill=tk.X, padx=5, pady=(5, 0))
         
         ttk.Label(top_bar, text="Storyboard", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
+        ttk.Button(top_bar, text="★", width=3, command=self._show_bookmarks).pack(side=tk.LEFT, padx=(10, 0))
         
         gear_btn = ttk.Button(top_bar, text="⚙", width=3, command=self._open_settings)
         gear_btn.pack(side=tk.RIGHT)
@@ -1140,6 +1235,7 @@ class WorldBuilderArchive(tk.Tk):
         self._editor_area.pack(fill=tk.BOTH, expand=True)
         self._open_tabs = []  # list of path_lists
         self._tab_buttons = {}  # path_string -> button widget
+        self._bookmark_btn = None
         self._popped_out_files = {}  # path_string -> Toplevel window
         
         self._vfs_panel_visible = True
@@ -1281,6 +1377,12 @@ class WorldBuilderArchive(tk.Tk):
         else:
             menu.add_command(label="Rename", command=lambda: self._rename_node(path_list))
             menu.add_command(label="Duplicate", command=lambda: self._copy_node(path_list))
+            menu.add_separator()
+            path_str = self._get_path_string(path_list)
+            if path_str in self._get_bookmarks():
+                menu.add_command(label="★ Remove Bookmark", command=lambda: self._remove_bookmark(path_str))
+            else:
+                menu.add_command(label="☆ Add Bookmark", command=lambda: self._add_bookmark(path_str))
             menu.add_separator()
             menu.add_command(label="New File in Folder", command=lambda: self._ctx_create_file(path_list[:-1]))
             menu.add_separator()
@@ -1878,6 +1980,8 @@ class WorldBuilderArchive(tk.Tk):
             self.active_editor = TimelineEditor(editor_frame, content, controller=self)
         elif file_name.lower().endswith('.image'):
             self.active_editor = ImageViewer(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.graph'):
+            self.active_editor = GraphEditor(editor_frame, content, controller=self)
         else:
             self.active_editor = TextEditor(editor_frame, content, controller=self)
 
@@ -1890,6 +1994,8 @@ class WorldBuilderArchive(tk.Tk):
                 btn.state(['pressed'])
             else:
                 btn.state(['!pressed'])
+
+        self._update_bookmark_button()
 
     def _tab_right_click(self, event, path_list):
         """Right-click menu on a tab."""
@@ -1912,6 +2018,7 @@ class WorldBuilderArchive(tk.Tk):
         win.title(f"Storyboard - {file_name}")
         win.geometry("800x600")
 
+
         editor_frame = ttk.Frame(win, padding="5")
         editor_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -1921,6 +2028,8 @@ class WorldBuilderArchive(tk.Tk):
             editor = TimelineEditor(editor_frame, content, controller=self)
         elif file_name.lower().endswith('.image'):
             editor = ImageViewer(editor_frame, content, controller=self)
+        elif file_name.lower().endswith('.graph'):
+            editor = GraphEditor(editor_frame, content, controller=self)
         else:
             editor = TextEditor(editor_frame, content, controller=self)
 
@@ -1962,6 +2071,7 @@ class WorldBuilderArchive(tk.Tk):
         else:
             self._clear_right_panel()
             self.active_file_path = None
+            self._update_bookmark_button()
 
     def _close_other_tabs(self, keep_path_list):
         """Close all tabs except the specified one."""
@@ -2253,6 +2363,46 @@ class TextEditor(ttk.Frame):
         n_btn = ttk.Button(toolbar, text="1. List", width=6, command=lambda: (self._toggle_numbered(), self.text_widget.focus_set()))
         n_btn.pack(side=tk.LEFT, padx=1)
         self._add_tooltip(n_btn, "Numbered List")
+        
+        # Help tooltip
+        help_btn = ttk.Label(toolbar, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT, padx=5)
+        _help_text = (
+            "Formatting:\n"
+            "  Ctrl+B — Bold\n"
+            "  Ctrl+I — Italic\n"
+            "  Ctrl+U — Underline\n\n"
+            "Editing:\n"
+            "  Ctrl+Z — Undo\n"
+            "  Ctrl+Y — Redo\n"
+            "  Ctrl+A — Select all\n"
+            "  Ctrl+F — Find\n"
+            "  Tab — Indent list item\n"
+            "  Backspace — Outdent list item\n"
+            "  Enter — Continue list\n\n"
+            "Links:\n"
+            "  Right-click — Insert/remove link\n"
+            "  Click link — Open linked file\n\n"
+            "Spelling:\n"
+            "  Right-click red word — Suggestions\n"
+            "  Add to dictionary"
+        )
+        _help_tip = [None]
+        def _show_help(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 300}+{e.y_root + 20}")
+            tk.Label(tip, text=_help_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _help_tip[0] = tip
+        def _hide_help(e):
+            if _help_tip[0]:
+                _help_tip[0].destroy()
+                _help_tip[0] = None
+        help_btn.bind("<Enter>", _show_help)
+        help_btn.bind("<Leave>", _hide_help)
         
         # Find bar (initially hidden)
         self.find_frame = ttk.Frame(self)
@@ -2891,18 +3041,42 @@ class TimelineEditor(ttk.Frame):
             "events": []
         }
         
-        # Current time position
-        self.current_age = tk.IntVar(value=1)
-        self.current_year = tk.IntVar(value=1)
+        # Current time position (restore from saved position if available)
+        pos = self.config_data.get("last_position", {})
+        self.current_age = tk.IntVar(value=pos.get("age", 1))
+        self.current_year = tk.IntVar(value=pos.get("year", 1))
         self.current_year.trace_add('write', self._handle_year_zero)
-        self.current_month = tk.IntVar(value=1) 
-        self.current_day_of_week = tk.IntVar(value=1)
-        self.current_day_of_month = tk.IntVar(value=1)
+        self.current_month = tk.IntVar(value=pos.get("month", 1)) 
+        self.current_day_of_week = tk.IntVar(value=pos.get("day_of_week", 1))
+        self.current_day_of_month = tk.IntVar(value=pos.get("day_of_month", 1))
         
         self._load_content(initial_content)
+        self._initializing = True
+        self._updating_from_master = True  # Suppress master timeline command during init
         self._create_widgets()
+        self._updating_from_master = False
         self._populate_events()
-        self._update_display()
+        
+        # Restore saved scrubber position after widgets are configured
+        pos = self.config_data.get("last_position", {})
+        if pos:
+            self._updating_from_master = True
+            self.current_age.set(pos.get("age", 1))
+            # Update year range for the restored age
+            visible_units = self.config_data.get("visible_units", {})
+            if visible_units.get("ages", True) and not self.config_data.get("bc_ad_enabled", False):
+                current_age = pos.get("age", 1)
+                years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(current_age), 100)
+                self.year_scale.config(from_=1, to=years_in_age)
+            self.current_year.set(pos.get("year", 1))
+            self.current_month.set(pos.get("month", 1))
+            self.current_day_of_month.set(pos.get("day_of_month", 1))
+            self._updating_from_master = False
+        self._initializing = False
+        self._update_day_of_month()
+        
+        if self._visual_mode:
+            self.after(100, lambda: (self._auto_center_visual_timeline(), self._draw_visual_timeline()))
 
     def _load_content(self, content):
         """Load timeline data from JSON content."""
@@ -2957,6 +3131,37 @@ class TimelineEditor(ttk.Frame):
         self.config_toggle_btn = ttk.Button(config_header_frame, text="▶ Time Configuration", 
                                            command=self._toggle_config_panel)
         self.config_toggle_btn.pack(side=tk.LEFT)
+
+        # Help tooltip
+        help_btn = ttk.Label(config_header_frame, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT)
+        _help_text = (
+            "Hotkeys:\n"
+            "  Enter — Edit event\n"
+            "  Shift+Enter — New event\n"
+            "  Delete — Delete event\n"
+            "  Arrow keys — Navigate events\n\n"
+            "Controls:\n"
+            "  Right-click — Go to event date\n"
+            "  Scroll on scrubbers — Adjust value\n"
+            "  Double-click event — Edit"
+        )
+        _help_tip = [None]
+        def _show_help(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 300}+{e.y_root + 20}")
+            tk.Label(tip, text=_help_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _help_tip[0] = tip
+        def _hide_help(e):
+            if _help_tip[0]:
+                _help_tip[0].destroy()
+                _help_tip[0] = None
+        help_btn.bind("<Enter>", _show_help)
+        help_btn.bind("<Leave>", _hide_help)
         
         self.config_frame = ttk.Frame(self, padding="10")
         # Don't pack initially - will be packed/unpacked by toggle
@@ -3050,22 +3255,24 @@ class TimelineEditor(ttk.Frame):
         self.ad_years_spinbox = None
 
         # Time Scrubber Section  
-        scrubber_frame = ttk.LabelFrame(self, text="Time Navigator", padding="10")
-        scrubber_frame.pack(fill=tk.X, padx=5, pady=5)
+        scrubber_frame = ttk.LabelFrame(self, text="Time Navigator", padding="3")
+        scrubber_frame.pack(fill=tk.X, padx=5, pady=2)
         
         # Current time display
-        self.time_display = ttk.Label(scrubber_frame, text="", font=('Helvetica', 14, 'bold'))
-        self.time_display.pack(pady=5)
+        self.time_display = ttk.Label(scrubber_frame, text="", font=('Helvetica', 12, 'bold'))
+        self.time_display.pack(pady=1)
+        self._recurring_display = tk.Label(scrubber_frame, text="", font=('Helvetica', 10, 'bold'), fg="#DAA520")
+        self._recurring_display.pack()
         
         # Master timeline scrubber
         master_frame = ttk.Frame(scrubber_frame)
-        master_frame.pack(fill=tk.X, pady=(0, 10))
+        master_frame.pack(fill=tk.X, pady=(0, 3))
         
-        ttk.Label(master_frame, text="Master Timeline:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(master_frame, text="Master:").pack(side=tk.LEFT, padx=(0, 3))
         self.master_timeline_var = tk.IntVar(value=0)
         self.master_timeline_scale = ttk.Scale(master_frame, from_=0, to=1000000, orient=tk.HORIZONTAL,
                                               variable=self.master_timeline_var, command=self._update_from_master_timeline)
-        self.master_timeline_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.master_timeline_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3)
         self.master_timeline_scale.bind("<MouseWheel>", lambda e: self._scroll_master_timeline(e))
         
         # Update master timeline range
@@ -3078,8 +3285,10 @@ class TimelineEditor(ttk.Frame):
         
         # Age scrubber
         ttk.Label(controls_frame, text="Age:").grid(row=0, column=0, padx=5)
-        self.age_scale = ttk.Scale(controls_frame, from_=1, to=10, orient=tk.HORIZONTAL,
-                                  variable=self.current_age, command=self._update_age_change)
+        age_count = self.config_data["time_units"]["ages"]["count"]
+        self.age_scale = tk.Scale(controls_frame, from_=1, to=age_count, orient=tk.HORIZONTAL,
+                                  variable=self.current_age, command=self._update_age_change,
+                                  resolution=1, showvalue=True, sliderlength=15, width=12)
         self.age_scale.grid(row=0, column=1, sticky="ew", padx=5)
         self.age_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_age))
         
@@ -3095,22 +3304,27 @@ class TimelineEditor(ttk.Frame):
         else:
             year_from = 1
             year_to = year_count
-        self.year_scale = ttk.Scale(controls_frame, from_=year_from, to=year_to, orient=tk.HORIZONTAL,
-                                   variable=self.current_year, command=self._update_day_of_month)
+        self.year_scale = tk.Scale(controls_frame, from_=year_from, to=year_to, orient=tk.HORIZONTAL,
+                                   variable=self.current_year, command=self._update_day_of_month,
+                                   resolution=1, showvalue=True, sliderlength=15, width=12)
         self.year_scale.grid(row=1, column=1, sticky="ew", padx=5)
         self.year_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_year))
         
         # Month scrubber  
         ttk.Label(controls_frame, text="Month:").grid(row=2, column=0, padx=5)
-        self.month_scale = ttk.Scale(controls_frame, from_=1, to=12, orient=tk.HORIZONTAL,
-                                    variable=self.current_month, command=self._update_day_of_month)
+        month_count = self.config_data["time_units"]["months"]["count"]
+        self.month_scale = tk.Scale(controls_frame, from_=1, to=month_count, orient=tk.HORIZONTAL,
+                                    variable=self.current_month, command=self._update_day_of_month,
+                                    resolution=1, showvalue=True, sliderlength=15, width=12)
         self.month_scale.grid(row=2, column=1, sticky="ew", padx=5)
         self.month_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_month))
         
         # Day of month scrubber
         ttk.Label(controls_frame, text="Day of Month:").grid(row=3, column=0, padx=5)
-        self.day_month_scale = ttk.Scale(controls_frame, from_=1, to=30, orient=tk.HORIZONTAL, 
-                                        variable=self.current_day_of_month, command=self._update_day_of_month)
+        day_count = self.config_data["time_units"]["days_of_month"]["count"]
+        self.day_month_scale = tk.Scale(controls_frame, from_=1, to=day_count, orient=tk.HORIZONTAL, 
+                                        variable=self.current_day_of_month, command=self._update_day_of_month,
+                                        resolution=1, showvalue=True, sliderlength=15, width=12)
         self.day_month_scale.grid(row=3, column=1, sticky="ew", padx=5)
         self.day_month_scale.bind("<MouseWheel>", lambda e: self._scroll_scale(e, self.current_day_of_month))
         
@@ -3120,13 +3334,6 @@ class TimelineEditor(ttk.Frame):
         events_frame = ttk.LabelFrame(self, text="Timeline Events", padding="10")
         events_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Hotkey legend
-        legend_frame = ttk.Frame(events_frame)
-        legend_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        legend_text = "Hotkeys: Enter=Edit Event | Shift+Enter=New Event | Del=Delete Event | Right-Click=Go to Event Date"
-        ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
-        
         # Event management buttons
         btn_frame = ttk.Frame(events_frame)
         btn_frame.pack(fill=tk.X, pady=(0,5))
@@ -3134,23 +3341,89 @@ class TimelineEditor(ttk.Frame):
         ttk.Button(btn_frame, text="Add Event", command=self._add_event).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Edit Event", command=self._edit_event).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Delete Event", command=self._delete_event).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🔁 Recurring", command=self._manage_recurring_events).pack(side=tk.LEFT, padx=2)
+        
+        # View toggle button
+        self._visual_mode = self.config_data.get("view_mode", "list") == "visual"
+        self._visual_selected_event = None
+        btn_text = "📋 List" if self._visual_mode else "📊 Visual"
+        self._view_toggle_btn = ttk.Button(btn_frame, text=btn_text, command=self._toggle_visual_view)
+        self._view_toggle_btn.pack(side=tk.RIGHT, padx=2)
+        
+        # Container for both views
+        self._events_container = ttk.Frame(events_frame)
+        self._events_container.pack(fill=tk.BOTH, expand=True)
         
         # Events tree with scrollbar
-        tree_frame = ttk.Frame(events_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        tree_frame.pack_propagate(False)
+        self._tree_view_frame = ttk.Frame(self._events_container)
+        if not self._visual_mode:
+            self._tree_view_frame.pack(fill=tk.BOTH, expand=True)
+        self._tree_view_frame.pack_propagate(False)
         
-        self.events_tree = ttk.Treeview(tree_frame, columns=('Start Time', 'End Time', 'Description'), show='tree headings')
+        self.events_tree = ttk.Treeview(self._tree_view_frame, columns=('Start Time', 'End Time', 'Description'), show='tree headings')
         self.events_tree.heading('#0', text='Event Name')
         self.events_tree.heading('Start Time', text='Start Time')
         self.events_tree.heading('End Time', text='End Time')
         self.events_tree.heading('Description', text='Description')
         
-        events_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.events_tree.yview)
+        events_scrollbar = ttk.Scrollbar(self._tree_view_frame, orient=tk.VERTICAL, command=self.events_tree.yview)
         events_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.events_tree.configure(yscrollcommand=events_scrollbar.set)
         self.events_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Visual timeline canvas (shown if view_mode is visual)
+        self._visual_view_frame = ttk.Frame(self._events_container)
+        if self._visual_mode:
+            self._visual_view_frame.pack(fill=tk.BOTH, expand=True)
+        # Precision control bar
+        self._visual_precision_var = tk.BooleanVar(value=False)
+        precision_bar = ttk.Frame(self._visual_view_frame)
+        precision_bar.pack(fill=tk.X)
+        ttk.Checkbutton(precision_bar, text="Precision (1 day/scroll)", variable=self._visual_precision_var).pack(side=tk.LEFT, padx=5)
+        # Help tooltip
+        help_btn = ttk.Label(precision_bar, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT, padx=5)
+        _vhelp_text = (
+            "Controls:\n"
+            "  Scroll — Pan timeline\n"
+            "  Space — Toggle precision mode\n"
+            "  Click event — Select & go to date\n"
+            "  Right-click — Context menu\n\n"
+            "Precision mode:\n"
+            "  Scrolls 1 day at a time"
+        )
+        _vhelp_tip = [None]
+        def _show_vhelp(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 200}+{e.y_root + 20}")
+            tk.Label(tip, text=_vhelp_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _vhelp_tip[0] = tip
+        def _hide_vhelp(e):
+            if _vhelp_tip[0]:
+                _vhelp_tip[0].destroy()
+                _vhelp_tip[0] = None
+        help_btn.bind("<Enter>", _show_vhelp)
+        help_btn.bind("<Leave>", _hide_vhelp)
+        self._timeline_canvas = tk.Canvas(self._visual_view_frame, bg="#1e1e1e", highlightthickness=0)
+        self._timeline_canvas.pack(fill=tk.BOTH, expand=True)
+        self._timeline_canvas.bind('<Configure>', lambda e: self._draw_visual_timeline())
+        self._timeline_canvas.bind('<MouseWheel>', self._visual_scroll)
+        self._timeline_canvas.bind('<Button-4>', lambda e: self._visual_scroll_linux(1))
+        self._timeline_canvas.bind('<Button-5>', lambda e: self._visual_scroll_linux(-1))
+        self._timeline_canvas.bind('<ButtonPress-1>', self._visual_on_click)
+        self._timeline_canvas.bind('<ButtonRelease-3>', self._visual_right_click)
+        self._timeline_canvas.bind('<space>', lambda e: self._visual_precision_var.set(not self._visual_precision_var.get()))
+        self._timeline_canvas.bind('<Enter>', lambda e: self._timeline_canvas.focus_set())
+        self._timeline_canvas.bind('<Motion>', self._visual_on_hover)
+        self._visual_tooltip = None
+        self._visual_hover_event = None
+        self._visual_hover_after = None
+        self._visual_pan_offset = 0  # horizontal scroll offset in pixels
         
         # Bind hotkeys to the events tree
         self.events_tree.bind('<Return>', self._hotkey_edit_event)
@@ -3212,7 +3485,8 @@ class TimelineEditor(ttk.Frame):
 
     def _update_ranges(self):
         """Update scrubber ranges based on configuration."""
-        self.age_scale.config(to=self.ages_count_var.get())
+        age_to = self.ages_count_var.get()
+        self.age_scale.config(to=age_to)
         
         # Update year range based on BC/AD setting
         if self.config_data.get("bc_ad_enabled", False):
@@ -3233,8 +3507,10 @@ class TimelineEditor(ttk.Frame):
                 year_count = self.years_count_var.get()
                 self.year_scale.config(from_=1, to=year_count)
             
-        self.month_scale.config(to=self.months_count_var.get())
-        self.day_month_scale.config(to=self.days_of_month_count_var.get())
+        month_to = self.months_count_var.get()
+        self.month_scale.config(to=month_to)
+        day_to = self.days_of_month_count_var.get()
+        self.day_month_scale.config(to=day_to)
         
         # Update config data
         self.config_data["time_units"]["ages"]["count"] = self.ages_count_var.get()
@@ -3250,6 +3526,8 @@ class TimelineEditor(ttk.Frame):
 
     def _update_bc_ad_labels(self, *args):
         """Update BC/AD labels in real-time as user types."""
+        if getattr(self, '_updating_bc_ad_vars', False):
+            return
         if self.config_data.get("bc_ad_enabled", False):
             self.config_data["bc_label"] = self.bc_var.get()
             self.config_data["ad_label"] = self.ad_var.get()
@@ -3471,6 +3749,8 @@ class TimelineEditor(ttk.Frame):
 
     def _update_from_master_timeline(self, *args):
         """Update individual scrubbers from master timeline position."""
+        if getattr(self, '_updating_from_master', False):
+            return
         self._updating_from_master = True
         cumulative_days = int(self.master_timeline_var.get())
         self._set_from_cumulative_days(cumulative_days)
@@ -3669,8 +3949,10 @@ class TimelineEditor(ttk.Frame):
             self.config_data.update(dialog.result["bc_ad_config"])
             epochal = self.config_data.get("bc_ad_enabled", False)
             self.bc_ad_var.set(epochal)
+            self._updating_bc_ad_vars = True
             self.bc_var.set(self.config_data.get("bc_label", "BC"))
             self.ad_var.set(self.config_data.get("ad_label", "AD"))
+            self._updating_bc_ad_vars = False
 
             # Update ages checkbox label and state based on dating system chosen
             ages_checkbox = getattr(self, "ages_checkbox", None)
@@ -3820,6 +4102,16 @@ class TimelineEditor(ttk.Frame):
 
     def _update_display(self, *args):
         """Update the time display with current values."""
+        # Save current position to config_data (skip during init)
+        if not getattr(self, '_initializing', False):
+            self.config_data["last_position"] = {
+                "age": int(self.current_age.get()),
+                "year": int(self.current_year.get()),
+                "month": int(self.current_month.get()),
+                "day_of_week": int(self.current_day_of_week.get()),
+                "day_of_month": int(self.current_day_of_month.get())
+            }
+        
         visible_units = self.config_data.get("visible_units", {})
         display_parts = []
         
@@ -3847,10 +4139,34 @@ class TimelineEditor(ttk.Frame):
             display_parts.append(day_week_name)
         
         display_text = " / ".join(display_parts) if display_parts else "No time units visible"
+        
+        # Check for recurring events matching current date
+        current_time = {
+            "age": int(self.current_age.get()),
+            "year": int(self.current_year.get()),
+            "month": int(self.current_month.get()),
+            "day_of_week": int(self.current_day_of_week.get()),
+            "day_of_month": int(self.current_day_of_month.get())
+        }
+        matching_recurring = [r["name"] for r in self.config_data.get("recurring_events", [])
+                             if self._recurring_matches(r, current_time)]
+        if matching_recurring:
+            self._recurring_display.config(text="★ " + ", ".join(matching_recurring))
+        else:
+            self._recurring_display.config(text="")
+        
         self.time_display.config(text=display_text)
+        
+        # Deselect events so highlighting is visible
+        self.events_tree.selection_remove(self.events_tree.selection())
         
         # Highlight matching events
         self._highlight_matching_events()
+        
+        # Refresh visual timeline if active
+        if self._visual_mode and not getattr(self, '_skip_visual_refresh', False):
+            self._auto_center_visual_timeline()
+            self._draw_visual_timeline()
 
     def _on_event_right_click(self, event):
         """Right-click context menu on timeline events."""
@@ -3860,7 +4176,27 @@ class TimelineEditor(ttk.Frame):
         self.events_tree.selection_set(item)
         self.events_tree.focus(item)
 
-        # Get the event
+        # Check if this is a recurring event item
+        item_text = str(self.events_tree.item(item, 'text'))
+        if item_text.startswith("★"):
+            # Recurring event — find it by name
+            rec_name = item_text[2:]  # strip "★ "
+            rec = next((r for r in self.config_data.get("recurring_events", [])
+                       if r["name"] == rec_name), None)
+            if not rec:
+                return
+            menu = tk.Menu(self, tearoff=0)
+            all_links = parse_links(rec.get("description", ""))
+            if all_links and self.controller:
+                for _, _, path, display in all_links:
+                    menu.add_command(label=f"Open: {display}",
+                                   command=lambda p=path: self.controller._open_file_editor(p.split('/')))
+                menu.add_separator()
+            menu.add_command(label="Edit Recurring Event", command=lambda r=rec: self._edit_single_recurring(r))
+            popup_menu(menu, event.x_root, event.y_root)
+            return
+
+        # Regular event
         evt = self._get_event_by_id(item)
 
         menu = tk.Menu(self, tearoff=0)
@@ -3873,6 +4209,8 @@ class TimelineEditor(ttk.Frame):
                                command=lambda p=path: self.controller._open_file_editor(p.split('/')))
             menu.add_separator()
 
+        menu.add_command(label="Go to Date", command=lambda: self._go_to_event_date(item))
+        menu.add_separator()
         menu.add_command(label="Edit Event", command=lambda: self._hotkey_edit_event(None))
         menu.add_command(label="Delete Event", command=lambda: self._hotkey_delete_event(None))
         popup_menu(menu, event.x_root, event.y_root)
@@ -3880,6 +4218,20 @@ class TimelineEditor(ttk.Frame):
     def _insert_event_link(self, item_id):
         """Open edit dialog for the event to insert a link in description."""
         self._hotkey_edit_event(None)
+
+    def _go_to_event_date(self, item_id):
+        """Move scrubbers to the selected event's start date."""
+        try:
+            evt = self._get_event_by_id(item_id)
+            start_time = evt.get("start_time", {})
+        except (IndexError, KeyError):
+            return
+        if start_time:
+            self.current_age.set(start_time.get("age", 1))
+            self.current_year.set(start_time.get("year", 1))
+            self.current_month.set(start_time.get("month", 1))
+            self.current_day_of_month.set(start_time.get("day_of_month", 1))
+            self._update_age_change()
 
     def _on_event_click(self, event):
         """Move scrubbers to match the clicked event's start date."""
@@ -4019,6 +4371,19 @@ class TimelineEditor(ttk.Frame):
             evt = evt.get("sub_events", [])[int(p)]
         return evt
 
+    def _find_event_index(self, evt):
+        """Find the event by identity and return its index in its parent list, or None."""
+        def search(events_list):
+            for i, e in enumerate(events_list):
+                if e is evt:
+                    return (events_list, i)
+                result = search(e.get("sub_events", []))
+                if result:
+                    return result
+            return None
+        result = search(self.config_data["events"])
+        return result  # Returns (parent_list, index) or None
+
     def _delete_event_by_id(self, item_id):
         """Delete an event by its tree item_id."""
         parts = item_id.split("_")
@@ -4065,6 +4430,37 @@ class TimelineEditor(ttk.Frame):
 
     def _edit_event(self):
         """Edit selected event or sub-event."""
+        # Visual mode: use visually selected event
+        if self._visual_mode and self._visual_selected_event:
+            event = self._visual_selected_event
+            current_time = event.get("start_time", {
+                "age": int(self.current_age.get()),
+                "year": int(self.current_year.get()),
+                "month": int(self.current_month.get()),
+                "day_of_week": int(self.current_day_of_week.get()),
+                "day_of_month": int(self.current_day_of_month.get())
+            })
+            dialog = TimelineEventDialog(self, current_time, event)
+            if dialog.result:
+                existing_sub_events = event.get("sub_events", [])
+                dialog.result["sub_events"] = existing_sub_events
+                result = self._find_event_index(event)
+                if result:
+                    parent_list, idx = result
+                    del parent_list[idx]
+                # Re-insert at correct position
+                new_start = self._get_event_sort_key(dialog.result)
+                new_end = None
+                if dialog.result.get("end_time"):
+                    et = dialog.result["end_time"]
+                    new_end = (et.get("age", 0), et.get("year", 0), et.get("month", 0),
+                              et.get("day_of_month", 0), et.get("day_of_week", 0))
+                target_list = self._find_deepest_parent(self.config_data["events"], new_start, new_end)
+                target_list.append(dialog.result)
+                self._visual_selected_event = dialog.result
+                self._populate_events()
+            return
+
         selection = self.events_tree.selection()
         if not selection:
             messagebox.showinfo("Selection Required", "Please select an event to edit.")
@@ -4096,19 +4492,47 @@ class TimelineEditor(ttk.Frame):
             existing_sub_events = event.get("sub_events", [])
             dialog.result["sub_events"] = existing_sub_events
             
-            # Replace event in the tree
+            # Remove from current position
             parts = item_id.split("_")
             if len(parts) == 1:
-                self.config_data["events"][int(parts[0])] = dialog.result
+                del self.config_data["events"][int(parts[0])]
             else:
                 parent = self.config_data["events"][int(parts[0])]
                 for p in parts[1:-1]:
                     parent = parent["sub_events"][int(p)]
-                parent["sub_events"][int(parts[-1])] = dialog.result
+                del parent["sub_events"][int(parts[-1])]
+            
+            # Re-insert at correct position (handles nesting by date range)
+            new_start = self._get_event_sort_key(dialog.result)
+            new_end = None
+            if dialog.result.get("end_time"):
+                et = dialog.result["end_time"]
+                new_end = (et.get("age", 0), et.get("year", 0), et.get("month", 0),
+                          et.get("day_of_month", 0), et.get("day_of_week", 0))
+            parent_list = self._find_deepest_parent(self.config_data["events"], new_start, new_end)
+            parent_list.append(dialog.result)
             self._populate_events()
         
     def _delete_event(self):
         """Delete selected event or sub-event.""" 
+        # Visual mode: use visually selected event
+        if self._visual_mode and self._visual_selected_event:
+            evt = self._visual_selected_event
+            event_name = LINK_REGEX.sub(lambda m: m.group(2) or m.group(1).split('/')[-1], evt.get("name", ""))
+            sub_events_count = len(evt.get("sub_events", []))
+            if sub_events_count > 0:
+                message = f"Are you sure you want to delete '{event_name}' and its {sub_events_count} sub-event(s)?"
+            else:
+                message = f"Are you sure you want to delete '{event_name}'?"
+            if messagebox.askyesno("Confirm Delete", message):
+                result = self._find_event_index(evt)
+                if result:
+                    parent_list, idx = result
+                    del parent_list[idx]
+                self._visual_selected_event = None
+                self._populate_events()
+            return
+
         selection = self.events_tree.selection()
         if not selection:
             messagebox.showinfo("Selection Required", "Please select an event to delete.")
@@ -4160,6 +4584,19 @@ class TimelineEditor(ttk.Frame):
                                                values=(start_time_str, end_time_str, desc_display[:50]))
             
             self._populate_sub_events(main_item, event.get('sub_events', []), str(original_index))
+
+        # Add all recurring events to tree (always visible)
+        for i, rec in enumerate(self.config_data.get("recurring_events", [])):
+            desc = rec.get("description", "")
+            desc_display = LINK_REGEX.sub(lambda m: "⇗ " + (m.group(2) or m.group(1).split('/')[-1]), desc)
+            self.events_tree.insert('', 'end', iid=f"rec_{i}", text=f"★ {rec['name']}",
+                                   values=("Recurring", "", desc_display[:50]),
+                                   tags=('recurring',))
+        self.events_tree.tag_configure('recurring', background='#FFF9C4', foreground='#333333')
+
+        # Refresh visual timeline if active
+        if self._visual_mode:
+            self._draw_visual_timeline()
 
     def _populate_sub_events(self, parent_item, sub_events, id_prefix):
         """Recursively populate sub-events."""
@@ -4236,6 +4673,17 @@ class TimelineEditor(ttk.Frame):
         
         process_tree_items('', self.config_data["events"])
 
+        # Highlight recurring events that match current date
+        for i, rec in enumerate(self.config_data.get("recurring_events", [])):
+            item_id = f"rec_{i}"
+            try:
+                if self._recurring_matches(rec, current_time):
+                    self.events_tree.item(item_id, tags=('highlighted',))
+                else:
+                    self.events_tree.item(item_id, tags=('recurring',))
+            except Exception:
+                pass
+
     def _times_match(self, time1, time2):
         """Check if two time dictionaries match."""
         visible_units = self.config_data.get("visible_units", {})
@@ -4291,6 +4739,790 @@ class TimelineEditor(ttk.Frame):
             display_parts.append(day_week_name)
         
         return " / ".join(display_parts) if display_parts else "No time units visible"
+
+    # --- Visual Timeline View ---
+
+    def _recurring_matches(self, recurring_event, current_time):
+        """Check if a recurring event matches the current time based on its rule."""
+        if self._recurring_matches_exact(recurring_event, current_time):
+            return True
+        # Check if current day falls within duration of a prior matching day
+        duration = recurring_event.get("duration_days", 1)
+        if duration > 1:
+            current_days = self._get_event_cumulative_days(current_time)
+            days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+            months_per_year = self.config_data["time_units"]["months"]["count"]
+            for offset in range(1, duration):
+                # Reconstruct time_data for (current_days - offset)
+                prior_days = current_days - offset
+                # Reverse-engineer age/year/month/day from cumulative days
+                remaining = prior_days
+                if self.config_data.get("bc_ad_enabled", False):
+                    days_per_year = months_per_year * days_per_month
+                    if remaining >= 0:
+                        yr = remaining // days_per_year + 1
+                    else:
+                        yr = remaining // days_per_year
+                    remaining = remaining % days_per_year
+                    check_time = {"age": 1, "year": yr,
+                                  "month": remaining // days_per_month + 1,
+                                  "day_of_month": remaining % days_per_month + 1}
+                else:
+                    ages_count = self.config_data["time_units"]["ages"]["count"]
+                    age = 1
+                    for a in range(1, ages_count + 1):
+                        ypa = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(a), 100)
+                        days_in_age = ypa * months_per_year * days_per_month
+                        if remaining < days_in_age:
+                            age = a
+                            break
+                        remaining -= days_in_age
+                    days_per_year = months_per_year * days_per_month
+                    yr = remaining // days_per_year + 1
+                    remaining = remaining % days_per_year
+                    check_time = {"age": age, "year": yr,
+                                  "month": remaining // days_per_month + 1,
+                                  "day_of_month": remaining % days_per_month + 1}
+                if self._recurring_matches_exact(recurring_event, check_time):
+                    return True
+        return False
+
+    def _recurring_matches_exact(self, recurring_event, current_time):
+        """Check if a recurring event matches the current time exactly (single day)."""
+        rule = recurring_event.get("rule", {})
+        rtype = rule.get("type", "yearly")
+        every_n = rule.get("every_n", 1)
+
+        age = current_time.get("age", 1)
+        year = current_time.get("year", 1)
+        month = current_time.get("month", 1)
+        day_of_month = current_time.get("day_of_month", 1)
+
+        # Check start/end bounds
+        start = recurring_event.get("start")
+        end = recurring_event.get("end")
+        if start or end:
+            current_days = self._get_event_cumulative_days(current_time)
+            if start:
+                start_days = self._get_event_cumulative_days(start)
+                if current_days < start_days:
+                    return False
+            if end:
+                end_days = self._get_event_cumulative_days(end)
+                if current_days > end_days:
+                    return False
+
+        if rtype == "yearly":
+            # Check year interval: every N years from start year
+            start_data = recurring_event.get("start")
+            start_year = start_data.get("year", 1) if start_data else 1
+            if every_n > 1:
+                diff = year - start_year
+                if diff < 0 or diff % every_n != 0:
+                    return False
+            # Check month
+            if "month" in rule and rule["month"] != month:
+                return False
+            # Check day
+            if "occurrence" in rule and "day_of_week" in rule:
+                return self._check_dow_occurrence(rule["day_of_week"], rule["occurrence"],
+                                                  current_time)
+            elif "day_of_month" in rule:
+                return rule["day_of_month"] == day_of_month
+            return True
+
+        elif rtype == "monthly":
+            # Every N months from start
+            if every_n > 1:
+                start_data = recurring_event.get("start")
+                start_month = start_data.get("month", 1) if start_data else 1
+                start_year_m = start_data.get("year", 1) if start_data else 1
+                months_per_year = self.config_data["time_units"]["months"]["count"]
+                # Total months elapsed
+                total_current = (year - 1) * months_per_year + (month - 1)
+                total_start = (start_year_m - 1) * months_per_year + (start_month - 1)
+                diff = total_current - total_start
+                if diff < 0 or diff % every_n != 0:
+                    return False
+            # Check day
+            if "occurrence" in rule and "day_of_week" in rule:
+                return self._check_dow_occurrence(rule["day_of_week"], rule["occurrence"],
+                                                  current_time)
+            elif "day_of_month" in rule:
+                return rule["day_of_month"] == day_of_month
+            return True
+
+        elif rtype == "interval":
+            # Every N days from a start point
+            interval = rule.get("interval_days", 1)
+            start_data = recurring_event.get("start", {"age": 1, "year": 1, "month": 1, "day_of_month": 1})
+            start_days = self._get_event_cumulative_days(start_data)
+            current_days = self._get_event_cumulative_days(current_time)
+            diff = current_days - start_days
+            return diff >= 0 and diff % interval == 0
+
+        return False
+
+    def _find_dow_day(self, target_dow, occurrence, time_data):
+        """Find the day_of_month for the Nth (or last) occurrence of target_dow in the given month.
+        Returns the day number or None if not found."""
+        days_per_week = self.config_data["time_units"]["days_of_week"]["count"]
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        offset = self.config_data.get("day_week_offset", 0)
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        age = time_data.get("age", 1)
+        year = time_data.get("year", 1)
+        month = time_data.get("month", 1)
+
+        cumulative_years = 0
+        if not self.config_data.get("bc_ad_enabled", False):
+            for prev_age in range(1, age):
+                cumulative_years += self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+        year_offset = year - 1 if year > 0 else year
+        cumulative_days_to_month = (cumulative_years * months_per_year * days_per_month +
+                                    year_offset * months_per_year * days_per_month +
+                                    (month - 1) * days_per_month)
+        day1_dow = ((cumulative_days_to_month + offset) % days_per_week) + 1
+
+        matching_days = []
+        for d in range(1, days_per_month + 1):
+            dow = ((day1_dow - 1) + (d - 1)) % days_per_week + 1
+            if dow == target_dow:
+                matching_days.append(d)
+
+        if not matching_days:
+            return None
+        if occurrence == "last":
+            return matching_days[-1]
+        occ_map = {"1st": 0, "2nd": 1, "3rd": 2, "4th": 3}
+        idx = occ_map.get(occurrence, 0)
+        return matching_days[idx] if idx < len(matching_days) else None
+
+    def _check_dow_occurrence(self, target_dow, occurrence, time_data):
+        """Check if time_data's day_of_month is the Nth (or last) target_dow in that month."""
+        days_per_week = self.config_data["time_units"]["days_of_week"]["count"]
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        offset = self.config_data.get("day_week_offset", 0)
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+
+        age = time_data.get("age", 1)
+        year = time_data.get("year", 1)
+        month = time_data.get("month", 1)
+        current_dom = time_data.get("day_of_month", 1)
+
+        # Calculate dow for day 1 of this month
+        cumulative_years = 0
+        if not self.config_data.get("bc_ad_enabled", False):
+            for prev_age in range(1, age):
+                cumulative_years += self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+        year_offset = year - 1 if year > 0 else year
+        cumulative_days_to_month = (cumulative_years * months_per_year * days_per_month +
+                                    year_offset * months_per_year * days_per_month +
+                                    (month - 1) * days_per_month)
+        day1_dow = ((cumulative_days_to_month + offset) % days_per_week) + 1
+
+        # Find all days in this month with target_dow
+        matching_days = []
+        for d in range(1, days_per_month + 1):
+            dow = ((day1_dow - 1) + (d - 1)) % days_per_week + 1
+            if dow == target_dow:
+                matching_days.append(d)
+
+        if not matching_days:
+            return False
+
+        if occurrence == "last":
+            return current_dom == matching_days[-1]
+        else:
+            occ_map = {"1st": 0, "2nd": 1, "3rd": 2, "4th": 3}
+            idx = occ_map.get(occurrence, 0)
+            if idx < len(matching_days):
+                return current_dom == matching_days[idx]
+        return False
+
+    def _edit_single_recurring(self, rec):
+        """Open the edit dialog for a specific recurring event."""
+        dialog = RecurringEventEditDialog(self, self.config_data, rec)
+        if dialog.result:
+            # Find and replace the event in the list
+            events = self.config_data.get("recurring_events", [])
+            for i, r in enumerate(events):
+                if r is rec:
+                    events[i] = dialog.result
+                    break
+            self._populate_events()
+            self._update_display()
+
+    def _manage_recurring_events(self):
+        """Open dialog to manage recurring events (holidays)."""
+        dialog = RecurringEventsDialog(self, self.config_data)
+        if dialog.result is not None:
+            self.config_data["recurring_events"] = dialog.result
+            self._populate_events()
+            self._update_display()
+
+    def _toggle_visual_view(self):
+        """Toggle between tree view and visual timeline canvas."""
+        self._visual_mode = not self._visual_mode
+        self.config_data["view_mode"] = "visual" if self._visual_mode else "list"
+        if self._visual_mode:
+            self._tree_view_frame.pack_forget()
+            self._visual_view_frame.pack(fill=tk.BOTH, expand=True)
+            self._view_toggle_btn.config(text="📋 List")
+            self._visual_pan_offset = 0
+            self.after(50, lambda: (self._auto_center_visual_timeline(), self._draw_visual_timeline()))
+        else:
+            self._visual_view_frame.pack_forget()
+            self._tree_view_frame.pack(fill=tk.BOTH, expand=True)
+            self._view_toggle_btn.config(text="📊 Visual")
+
+    def _visual_scroll(self, event):
+        """Horizontal scroll the visual timeline with mouse wheel."""
+        step = 2 if self._visual_precision_var.get() else 40
+        self._visual_pan_offset += step if event.delta > 0 else -step
+        self._sync_scrubbers_from_pan()
+        self._draw_visual_timeline()
+
+    def _visual_scroll_linux(self, direction):
+        step = 2 if self._visual_precision_var.get() else 40
+        self._visual_pan_offset += step * direction
+        self._sync_scrubbers_from_pan()
+        self._draw_visual_timeline()
+
+    def _sync_scrubbers_from_pan(self):
+        """Update scrubbers to match the center of the visual timeline after panning."""
+        events = self.config_data.get("events", [])
+        recurring = self.config_data.get("recurring_events", [])
+        if not events and not recurring:
+            return
+        # Recompute min_day and px_per_day to find what day is at center
+        all_days = []
+        def collect_days(evt_list):
+            for evt in evt_list:
+                st = evt.get("start_time", {})
+                all_days.append(self._get_event_cumulative_days(st))
+                et = evt.get("end_time")
+                if et:
+                    all_days.append(self._get_event_cumulative_days(et))
+                collect_days(evt.get("sub_events", []))
+        collect_days(events)
+        for rec in recurring:
+            rs = rec.get("start")
+            if rs:
+                all_days.append(self._get_event_cumulative_days(rs))
+            re = rec.get("end")
+            if re:
+                all_days.append(self._get_event_cumulative_days(re))
+        if not all_days:
+            return
+        min_day = min(all_days)
+        max_day = max(all_days)
+        span = max_day - min_day
+        if span == 0:
+            span = 1
+        cw = self._timeline_canvas.winfo_width()
+        if cw < 10:
+            return
+        px_per_day = 2
+        # center_x = margin_left + (d - min_day) * px_per_day + pan = cw/2
+        # d = (cw/2 - pan - 20) / px_per_day + min_day
+        center_day = (cw / 2 - self._visual_pan_offset - 20) / px_per_day + min_day
+        center_day = max(min_day, min(max_day, center_day))
+        # Set scrubbers without triggering visual redraw loop
+        self._initializing = True
+        self._set_from_cumulative_days(int(center_day))
+        self._initializing = False
+        # Update the date display and recurring indicators (but not the visual timeline itself)
+        self.config_data["last_position"] = {
+            "age": int(self.current_age.get()),
+            "year": int(self.current_year.get()),
+            "month": int(self.current_month.get()),
+            "day_of_week": int(self.current_day_of_week.get()),
+            "day_of_month": int(self.current_day_of_month.get())
+        }
+        self._skip_visual_refresh = True
+        self._update_display()
+        self._skip_visual_refresh = False
+
+    def _visual_on_click(self, event):
+        """Handle click on the visual timeline to select an event."""
+        cx = event.x
+        cy = event.y
+        self._visual_selected_event = None
+        # Check if click hits an event block
+        for item in getattr(self, '_visual_event_rects', []):
+            x1, y1, x2, y2, evt = item
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                self._visual_selected_event = evt
+                start_time = evt.get("start_time", {})
+                if start_time:
+                    self.current_age.set(start_time.get("age", 1))
+                    self.current_year.set(start_time.get("year", 1))
+                    self.current_month.set(start_time.get("month", 1))
+                    self.current_day_of_month.set(start_time.get("day_of_month", 1))
+                    self._update_age_change()
+                else:
+                    self._draw_visual_timeline()
+                return
+        # Check if click hits a recurring event marker
+        for item in getattr(self, '_visual_recurring_rects', []):
+            x1, y1, x2, y2, rec, d = item
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                self._initializing = True
+                self._set_from_cumulative_days(int(d))
+                self._initializing = False
+                self._update_day_of_month()
+                return
+        self._draw_visual_timeline()
+
+    def _visual_hit_test(self, cx, cy):
+        """Return (event_dict, is_recurring) at canvas coordinates, or (None, False)."""
+        for x1, y1, x2, y2, evt in getattr(self, '_visual_event_rects', []):
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return evt, False
+        for x1, y1, x2, y2, rec, _d in getattr(self, '_visual_recurring_rects', []):
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return rec, True
+        return None, False
+
+    def _visual_right_click(self, event):
+        """Right-click context menu on the visual timeline."""
+        evt, is_recurring = self._visual_hit_test(event.x, event.y)
+        menu = tk.Menu(self, tearoff=0)
+        if evt and is_recurring:
+            # Recurring event star
+            all_links = parse_links(evt.get("description", ""))
+            if all_links and self.controller:
+                for _, _, path, display in all_links:
+                    menu.add_command(label=f"Open: {display}",
+                                   command=lambda p=path: self.controller._open_file_editor(p.split('/')))
+                menu.add_separator()
+            menu.add_command(label="Edit Recurring Event", command=lambda r=evt: self._edit_single_recurring(r))
+        elif evt:
+            self._visual_selected_event = evt
+            self._draw_visual_timeline()
+
+            # Follow links in name/description
+            all_links = parse_links(evt.get("name", "")) + parse_links(evt.get("description", ""))
+            if all_links and self.controller:
+                for _, _, path, display in all_links:
+                    menu.add_command(label=f"Open: {display}",
+                                   command=lambda p=path: self.controller._open_file_editor(p.split('/')))
+                menu.add_separator()
+
+            menu.add_command(label="Go to Date", command=lambda: self._visual_go_to_date(evt))
+            menu.add_separator()
+            menu.add_command(label="Edit Event", command=self._edit_event)
+            menu.add_command(label="Delete Event", command=self._delete_event)
+        else:
+            menu.add_command(label="Add Event", command=self._add_event)
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _visual_go_to_date(self, evt):
+        """Navigate scrubbers to an event's start date."""
+        start_time = evt.get("start_time", {})
+        if start_time:
+            self.current_age.set(start_time.get("age", 1))
+            self.current_year.set(start_time.get("year", 1))
+            self.current_month.set(start_time.get("month", 1))
+            self.current_day_of_month.set(start_time.get("day_of_month", 1))
+            self._update_age_change()
+
+    def _visual_on_hover(self, event):
+        """Show tooltip with event description on hover (800ms delay)."""
+        evt, is_recurring = self._visual_hit_test(event.x, event.y)
+        if evt is self._visual_hover_event:
+            return
+        # Clear old tooltip and pending timer
+        if self._visual_hover_after:
+            self.after_cancel(self._visual_hover_after)
+            self._visual_hover_after = None
+        if self._visual_tooltip:
+            self._visual_tooltip.destroy()
+            self._visual_tooltip = None
+        self._visual_hover_event = evt
+        if not evt:
+            return
+
+        def show_tip():
+            desc = LINK_REGEX.sub(lambda m: m.group(2) or m.group(1).split('/')[-1], evt.get("description", ""))
+            name = LINK_REGEX.sub(lambda m: m.group(2) or m.group(1).split('/')[-1], evt.get("name", ""))
+            lines = [name]
+            if is_recurring:
+                lines.append("(Recurring)")
+            else:
+                start_str = self._format_event_time_display(evt.get("start_time", {}))
+                end_time = evt.get("end_time")
+                if end_time:
+                    end_str = self._format_event_time_display(end_time)
+                    lines.append(f"{start_str}  →  {end_str}")
+                else:
+                    lines.append(start_str)
+            if desc:
+                lines.append("")
+                lines.append(desc)
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+            tk.Label(tip, text="\n".join(lines), background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Helvetica', 9),
+                     justify=tk.LEFT, wraplength=300, padx=6, pady=4).pack()
+            self._visual_tooltip = tip
+
+        self._visual_hover_after = self.after(800, show_tip)
+
+    def _auto_center_visual_timeline(self):
+        """Adjust pan offset so the current time indicator is centered on the canvas."""
+        events = self.config_data.get("events", [])
+        recurring = self.config_data.get("recurring_events", [])
+        if not events and not recurring:
+            return
+        # Gather all event day positions to determine timeline range
+        all_days = []
+        def collect_days(evt_list):
+            for evt in evt_list:
+                st = evt.get("start_time", {})
+                all_days.append(self._get_event_cumulative_days(st))
+                et = evt.get("end_time")
+                if et:
+                    all_days.append(self._get_event_cumulative_days(et))
+                collect_days(evt.get("sub_events", []))
+        collect_days(events)
+        for rec in recurring:
+            rs = rec.get("start")
+            if rs:
+                all_days.append(self._get_event_cumulative_days(rs))
+            re = rec.get("end")
+            if re:
+                all_days.append(self._get_event_cumulative_days(re))
+        if not all_days:
+            return
+        cw = self._timeline_canvas.winfo_width()
+        if cw < 10:
+            return
+        margin_left = 20
+        px_per_day = 2
+        min_day = min(all_days)
+        current_days = self._get_cumulative_days()
+        raw_x = margin_left + (current_days - min_day) * px_per_day
+        self._visual_pan_offset = (cw / 2) - raw_x
+
+    def _get_event_cumulative_days(self, time_data):
+        """Calculate cumulative days for a given time dict (same logic as _get_cumulative_days but for arbitrary time)."""
+        day_of_month = time_data.get("day_of_month", 1)
+        month = time_data.get("month", 1)
+        year = time_data.get("year", 1)
+        age = time_data.get("age", 1)
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+
+        if self.config_data.get("bc_ad_enabled", False):
+            if year > 0:
+                adjusted_year = year - 1
+                return (adjusted_year * months_per_year * days_per_month +
+                        (month - 1) * days_per_month + (day_of_month - 1))
+            else:
+                return (year * months_per_year * days_per_month +
+                        (month - 1) * days_per_month + (day_of_month - 1))
+        else:
+            cumulative_years = 0
+            for prev_age in range(1, age):
+                cumulative_years += self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+            year_offset = year - 1 if year > 0 else year
+            return (cumulative_years * months_per_year * days_per_month +
+                    year_offset * months_per_year * days_per_month +
+                    (month - 1) * days_per_month + (day_of_month - 1))
+
+    def _draw_visual_timeline(self):
+        """Draw the graphical timeline with events as blocks on a time axis."""
+        canvas = self._timeline_canvas
+        canvas.delete("all")
+        self._visual_event_rects = []
+        self._visual_recurring_rects = []
+
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            return
+
+        events = self.config_data.get("events", [])
+        recurring = self.config_data.get("recurring_events", [])
+        if not events and not recurring:
+            canvas.create_text(cw // 2, ch // 2, text="No events to display",
+                             fill="#666666", font=('Helvetica', 12))
+            return
+
+        # Collect all events (flatten sub-events for display)
+        all_events = []
+        def collect(evt_list, depth=0):
+            for evt in evt_list:
+                all_events.append((evt, depth))
+                collect(evt.get("sub_events", []), depth + 1)
+        collect(events)
+
+        # Get cumulative day positions for all events
+        positions = []
+        for evt, depth in all_events:
+            st = evt.get("start_time", {})
+            et = evt.get("end_time")
+            start_days = self._get_event_cumulative_days(st)
+            end_days = self._get_event_cumulative_days(et) if et else None
+            positions.append((start_days, end_days, evt, depth))
+
+        # Determine timeline range (include recurring event ranges)
+        all_days = [p[0] for p in positions]
+        end_days_list = [p[1] for p in positions if p[1] is not None]
+        all_days.extend(end_days_list)
+        for rec in recurring:
+            rec_start = rec.get("start")
+            if rec_start:
+                all_days.append(self._get_event_cumulative_days(rec_start))
+            rec_end = rec.get("end")
+            if rec_end:
+                all_days.append(self._get_event_cumulative_days(rec_end))
+        if not all_days:
+            all_days = [0]
+        min_day = min(all_days)
+        max_day = max(all_days)
+        span = max_day - min_day
+        if span == 0:
+            span = 1
+
+        # Layout constants
+        margin_left = 20
+        margin_right = 20
+        axis_y = ch - 40
+        row_height = 28
+        top_margin = 10
+        pan = self._visual_pan_offset
+
+        # Fixed scale: constant pixels per day (no dynamic scaling)
+        px_per_day = 2
+        draw_width = span * px_per_day
+
+        def day_to_x(d):
+            return margin_left + (d - min_day) * px_per_day + pan
+
+        # Draw time axis
+        axis_x1 = day_to_x(min_day)
+        axis_x2 = day_to_x(max_day)
+        canvas.create_line(axis_x1, axis_y, axis_x2, axis_y, fill="#555555", width=2)
+
+        # Draw tick marks along axis
+        num_ticks = min(20, max(4, int(cw / 80)))
+        for i in range(num_ticks + 1):
+            d = min_day + (span * i) / num_ticks
+            tx = day_to_x(d)
+            canvas.create_line(tx, axis_y - 4, tx, axis_y + 4, fill="#555555", width=1)
+
+        # Current time indicator
+        current_days = self._get_cumulative_days()
+        cur_x = day_to_x(current_days)
+        if 0 <= cur_x <= cw:
+            canvas.create_line(cur_x, top_margin, cur_x, axis_y, fill="#FFD700", width=1, dash=(4, 2))
+
+        # Sort events by start time for row assignment (simple greedy lane allocation)
+        sorted_positions = sorted(positions, key=lambda p: p[0])
+        lanes = []  # each lane is the end_x of the last block placed in it
+
+        colors = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0", "#F44336", "#00BCD4", "#CDDC39", "#E91E63"]
+
+        for start_days, end_days, evt, depth in sorted_positions:
+            x1 = day_to_x(start_days)
+            if end_days is not None:
+                x2 = day_to_x(end_days)
+                x2 = max(x2, x1 + 8)  # minimum width
+            else:
+                x2 = x1  # point event
+
+            # Assign lane (find first lane where this event fits)
+            lane = 0
+            for i, lane_end in enumerate(lanes):
+                if x1 >= lane_end + 4:
+                    lane = i
+                    break
+            else:
+                lane = len(lanes)
+                lanes.append(0)
+            lanes[lane] = x2 if end_days else x1 + 20
+
+            y_top = top_margin + lane * row_height
+            y_bot = y_top + row_height - 4
+
+            # Skip if entirely off-screen
+            if x2 < 0 or x1 > cw:
+                continue
+
+            color = colors[(depth + lane) % len(colors)]
+            name = LINK_REGEX.sub(lambda m: m.group(2) or m.group(1).split('/')[-1], evt.get("name", ""))
+            is_selected = (evt is self._visual_selected_event)
+            outline_color = "#FFD700" if is_selected else "#ffffff"
+            outline_w = 3 if is_selected else 1
+
+            if end_days is not None:
+                # Range event — draw a bar
+                canvas.create_rectangle(x1, y_top, x2, y_bot, fill=color, outline=outline_color, width=outline_w)
+                # Clip text to block width
+                text_x = max(x1 + 4, 0)
+                canvas.create_text(text_x, (y_top + y_bot) // 2, text=name, anchor="w",
+                                 fill="#ffffff", font=('Helvetica', 9, 'bold'))
+                self._visual_event_rects.append((x1, y_top, x2, y_bot, evt))
+            else:
+                # Point event — draw a diamond marker
+                mx = x1
+                my = (y_top + y_bot) // 2
+                r = 6
+                canvas.create_polygon(mx, my - r, mx + r, my, mx, my + r, mx - r, my,
+                                     fill=color, outline=outline_color, width=outline_w)
+                canvas.create_text(mx + r + 4, my, text=name, anchor="w",
+                                 fill="#cccccc", font=('Helvetica', 8))
+                self._visual_event_rects.append((mx - r, my - r, mx + r, my + r, evt))
+
+        # Draw recurring events as star markers along the axis
+        if recurring:
+            days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+            months_per_year = self.config_data["time_units"]["months"]["count"]
+            ages_count = self.config_data["time_units"]["ages"]["count"]
+            drawn_recurring = set()
+
+            rec_lanes = []  # track end-x per lane for recurring events
+
+            def draw_recurring_marker(rx, rec, d):
+                """Draw a recurring event marker (star or bar if multi-day)."""
+                duration = rec.get("duration_days", 1)
+                if duration > 1:
+                    rx2 = day_to_x(d + duration)
+                    rx2 = max(rx2, rx + 12)
+                else:
+                    rx2 = rx + 20
+
+                # Assign lane
+                lane = 0
+                for i, lane_end in enumerate(rec_lanes):
+                    if rx >= lane_end + 4:
+                        lane = i
+                        break
+                else:
+                    lane = len(rec_lanes)
+                    rec_lanes.append(0)
+                rec_lanes[lane] = rx2
+
+                row_height = 18
+                ry = axis_y - 14 - lane * row_height
+
+                if duration > 1:
+                    canvas.create_rectangle(rx, ry - 6, rx2, ry + 6,
+                                          fill="#DAA520", outline="#FFD700", width=1, tags=("recurring",))
+                    canvas.create_text(rx + 3, ry, text=rec["name"], anchor="w",
+                                     fill="#000000", font=('Helvetica', 7, 'bold'), tags=("recurring",))
+                    self._visual_recurring_rects.append((rx, ry - 6, rx2, ry + 6, rec, d))
+                else:
+                    canvas.create_text(rx, ry, text="★", fill="#FFD700",
+                                     font=('Helvetica', 10), tags=("recurring",))
+                    canvas.create_text(rx, ry - 12, text=rec["name"], fill="#FFD700",
+                                     font=('Helvetica', 7), tags=("recurring",))
+                    self._visual_recurring_rects.append((rx - 10, ry - 20, rx + 10, ry + 8, rec, d))
+
+            for rec in recurring:
+                rule = rec.get("rule", {})
+                rtype = rule.get("type", "yearly")
+                rec_start = rec.get("start", {"age": 1, "year": 1, "month": 1, "day_of_month": 1})
+                rec_end = rec.get("end")
+
+                if rtype == "yearly":
+                    every_n = rule.get("every_n", 1)
+                    target_month = rule.get("month", 1)
+                    start_age = rec_start.get("age", 1)
+                    start_year = rec_start.get("year", 1)
+
+                    for age in range(start_age, ages_count + 1):
+                        years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(age), 100)
+                        y_start = start_year if age == start_age else 1
+                        for year in range(y_start, years_in_age + 1):
+                            if every_n > 1 and (year - start_year) % every_n != 0:
+                                continue
+                            # Determine the actual day for this occurrence
+                            if "day_of_month" in rule:
+                                dom = rule["day_of_month"]
+                            else:
+                                dom = 1  # fallback; dow-based rules checked below
+                            time_data = {"age": age, "year": year, "month": target_month, "day_of_month": dom}
+                            if rec_end:
+                                end_days = self._get_event_cumulative_days(rec_end)
+                                cur_days = self._get_event_cumulative_days(time_data)
+                                if cur_days > end_days:
+                                    break
+                            # For dow-based rules, find the actual matching day
+                            if "occurrence" in rule and "day_of_week" in rule:
+                                actual_dom = self._find_dow_day(rule["day_of_week"], rule["occurrence"], time_data)
+                                if actual_dom is None:
+                                    continue
+                                time_data["day_of_month"] = actual_dom
+                            d = self._get_event_cumulative_days(time_data)
+                            key = (rec["name"], d)
+                            if key not in drawn_recurring:
+                                drawn_recurring.add(key)
+                                rx = day_to_x(d)
+                                if -50 <= rx <= cw + 50:
+                                    draw_recurring_marker(rx, rec, d)
+                        else:
+                            continue
+                        break
+
+                elif rtype == "monthly":
+                    every_n = rule.get("every_n", 1)
+                    start_age = rec_start.get("age", 1)
+                    start_year = rec_start.get("year", 1)
+                    start_month = rec_start.get("month", 1)
+
+                    for age in range(start_age, ages_count + 1):
+                        years_in_age = self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(age), 100)
+                        y_start = start_year if age == start_age else 1
+                        for year in range(y_start, years_in_age + 1):
+                            m_start = start_month if (age == start_age and year == start_year) else 1
+                            for month in range(m_start, months_per_year + 1):
+                                # Check every_n months
+                                if every_n > 1:
+                                    total_current = (year - 1) * months_per_year + (month - 1)
+                                    total_start = (start_year - 1) * months_per_year + (start_month - 1)
+                                    if (total_current - total_start) % every_n != 0:
+                                        continue
+                                if "day_of_month" in rule:
+                                    dom = rule["day_of_month"]
+                                else:
+                                    dom = 1
+                                time_data = {"age": age, "year": year, "month": month, "day_of_month": dom}
+                                if rec_end:
+                                    cur_days = self._get_event_cumulative_days(time_data)
+                                    end_days = self._get_event_cumulative_days(rec_end)
+                                    if cur_days > end_days:
+                                        break
+                                if "occurrence" in rule and "day_of_week" in rule:
+                                    actual_dom = self._find_dow_day(rule["day_of_week"], rule["occurrence"], time_data)
+                                    if actual_dom is None:
+                                        continue
+                                    time_data["day_of_month"] = actual_dom
+                                d = self._get_event_cumulative_days(time_data)
+                                key = (rec["name"], d)
+                                if key not in drawn_recurring:
+                                    drawn_recurring.add(key)
+                                    rx = day_to_x(d)
+                                    if -50 <= rx <= cw + 50:
+                                        draw_recurring_marker(rx, rec, d)
+
+                elif rtype == "interval":
+                    interval = rule.get("interval_days", 1)
+                    start_days = self._get_event_cumulative_days(rec_start)
+                    end_days = self._get_event_cumulative_days(rec_end) if rec_end else (max_day + 1)
+                    d = start_days
+                    while d <= end_days and d <= max_day + days_per_month * months_per_year:
+                        rx = day_to_x(d)
+                        if -50 <= rx <= cw + 50:
+                            key = (rec["name"], d)
+                            if key not in drawn_recurring:
+                                drawn_recurring.add(key)
+                                draw_recurring_marker(rx, rec, d)
+                        d += interval
 
     def get_content(self):
         """Return the timeline data as JSON."""
@@ -4717,8 +5949,11 @@ class TimelineEventDialog(tk.Toplevel):
         time_data = {}
         visible_units = self.parent_editor.config_data.get("visible_units", {})
         
-        if visible_units.get("ages", True) and hasattr(self, f"{prefix}_age_var"):
+        # Always include age (default to current scrubber value if control not visible)
+        if hasattr(self, f"{prefix}_age_var"):
             time_data["age"] = getattr(self, f"{prefix}_age_var").get()
+        else:
+            time_data["age"] = int(self.parent_editor.current_age.get())
         # Include years if Ages OR Years is enabled (since ages need years)
         if visible_units.get("years", True) and hasattr(self, f"{prefix}_year_var"):
             time_data["year"] = getattr(self, f"{prefix}_year_var").get()
@@ -4738,16 +5973,26 @@ class TimelineEventDialog(tk.Toplevel):
             months_per_year = self.parent_editor.config_data["time_units"]["months"]["count"]
             offset = self.parent_editor.config_data.get("day_week_offset", 0)
             
-            # Calculate cumulative years from all previous ages
-            cumulative_years_from_ages = 0
-            for prev_age in range(1, age):
-                years_in_prev_age = self.parent_editor.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
-                cumulative_years_from_ages += years_in_prev_age
+            if self.parent_editor.config_data.get("bc_ad_enabled", False):
+                if year > 0:
+                    adjusted_year = year - 1
+                    cumulative_days = (adjusted_year * months_per_year * days_per_month +
+                                      (month - 1) * days_per_month + (day_of_month - 1))
+                else:
+                    cumulative_days = (year * months_per_year * days_per_month +
+                                      (month - 1) * days_per_month + (day_of_month - 1))
+            else:
+                # Calculate cumulative years from all previous ages
+                cumulative_years_from_ages = 0
+                for prev_age in range(1, age):
+                    years_in_prev_age = self.parent_editor.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(prev_age), 100)
+                    cumulative_years_from_ages += years_in_prev_age
+                
+                year_offset = year - 1 if year > 0 else year
+                cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
+                                  year_offset * months_per_year * days_per_month + 
+                                  (month - 1) * days_per_month + (day_of_month - 1))
             
-            year_offset = year - 1 if year > 0 else year
-            cumulative_days = (cumulative_years_from_ages * months_per_year * days_per_month +
-                              year_offset * months_per_year * days_per_month + 
-                              (month - 1) * days_per_month + (day_of_month - 1))
             day_of_week = ((cumulative_days + offset) % days_per_week) + 1
             time_data["day_of_week"] = day_of_week
         elif visible_units.get("days_of_week", True):
@@ -4947,6 +6192,511 @@ class TimelineEventDialog(tk.Toplevel):
                         self.events_tree.selection_set(children[0])
                         self.events_tree.see(children[0])
             self.events_tree.after(50, restore_focus)  # Longer delay
+
+
+class RecurringEventsDialog(tk.Toplevel):
+    """Dialog for managing recurring events."""
+    def __init__(self, parent, config_data):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Manage Recurring Events")
+        self.result = None
+        self.config_data = config_data
+        self._events = list(config_data.get("recurring_events", []))
+
+        self.geometry("500x350")
+        self._create_widgets()
+        self.bind('<Escape>', lambda e: self._close())
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.wait_window(self)
+
+    def _create_widgets(self):
+        list_frame = ttk.Frame(self)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.listbox = tk.Listbox(list_frame, width=60)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(list_frame, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._refresh_list()
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="Add", command=self._add).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Edit", command=self._edit).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Delete", command=self._delete).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Done", command=self._close).pack(side=tk.RIGHT, padx=2)
+
+    def _describe_rule(self, evt):
+        """Generate a human-readable description of the recurrence rule."""
+        rule = evt.get("rule", {})
+        rtype = rule.get("type", "yearly")
+        every_n = rule.get("every_n", 1)
+        parts = []
+
+        if rtype == "yearly":
+            if every_n == 1:
+                parts.append("Every year")
+            else:
+                parts.append(f"Every {every_n} years")
+            if "month" in rule:
+                month_name = self.config_data["time_units"]["months"]["names"].get(
+                    str(rule["month"]), f"Month {rule['month']}")
+                parts.append(f"in {month_name}")
+        elif rtype == "monthly":
+            if every_n == 1:
+                parts.append("Every month")
+            else:
+                parts.append(f"Every {every_n} months")
+        elif rtype == "interval":
+            parts.append(f"Every {rule.get('interval_days', 1)} days")
+
+        if "occurrence" in rule and "day_of_week" in rule:
+            dow_names = self.config_data["time_units"]["days_of_week"]["names"]
+            dow_name = dow_names.get(str(rule["day_of_week"]), f"Day {rule['day_of_week']}")
+            parts.append(f"on {rule['occurrence']} {dow_name}")
+        elif "day_of_month" in rule:
+            dom_names = self.config_data["time_units"]["days_of_month"]["names"]
+            dom_name = dom_names.get(str(rule["day_of_month"]), f"Day {rule['day_of_month']}")
+            parts.append(f"on {dom_name}")
+
+        # Show start/end range
+        start = evt.get("start")
+        end = evt.get("end")
+        if start:
+            parts.append(f"(from Y{start.get('year', 1)}")
+            if end:
+                parts.append(f"to Y{end.get('year', '∞')})")
+            else:
+                parts.append("onward)")
+
+        return " ".join(parts)
+
+    def _refresh_list(self):
+        self.listbox.delete(0, tk.END)
+        for evt in self._events:
+            desc = self._describe_rule(evt)
+            self.listbox.insert(tk.END, f"{evt['name']}  —  {desc}")
+
+    def _add(self):
+        dialog = RecurringEventEditDialog(self, self.config_data)
+        if dialog.result:
+            self._events.append(dialog.result)
+            self._refresh_list()
+
+    def _edit(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        dialog = RecurringEventEditDialog(self, self.config_data, self._events[idx])
+        if dialog.result:
+            self._events[idx] = dialog.result
+            self._refresh_list()
+
+    def _delete(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if messagebox.askyesno("Delete", f"Delete '{self._events[idx]['name']}'?", parent=self):
+            del self._events[idx]
+            self._refresh_list()
+
+    def _close(self):
+        self.result = self._events
+        self.destroy()
+
+
+class RecurringEventEditDialog(tk.Toplevel):
+    """Dialog for editing a single recurring event with flexible recurrence rules."""
+    def __init__(self, parent, config_data, existing=None):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Edit Recurring Event" if existing else "New Recurring Event")
+        self.result = None
+        self.config_data = config_data
+
+        self.geometry("460x520")
+        self._create_widgets(existing)
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self.wait_window(self)
+
+    def _create_widgets(self, existing):
+        rule = existing.get("rule", {}) if existing else {}
+        start = existing.get("start") if existing else None
+        end = existing.get("end") if existing else None
+        config_data = self.config_data
+        month_count = config_data["time_units"]["months"]["count"]
+        day_count = config_data["time_units"]["days_of_month"]["count"]
+        dow_count = config_data["time_units"]["days_of_week"]["count"]
+        age_count = config_data["time_units"]["ages"]["count"]
+
+        c = ttk.Frame(self, padding="10")
+        c.pack(fill=tk.BOTH, expand=True)
+
+        # === SECTION 1: What ===
+        what_frame = ttk.LabelFrame(c, text="What", padding="5")
+        what_frame.pack(fill=tk.X, pady=(0, 6))
+
+        f = ttk.Frame(what_frame); f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text="Name:").pack(side=tk.LEFT, padx=(0, 5))
+        self.name_var = tk.StringVar(value=existing.get("name", "") if existing else "")
+        ttk.Entry(f, textvariable=self.name_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        f = ttk.Frame(what_frame); f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text="Description:").pack(side=tk.LEFT, padx=(0, 5), anchor="n")
+        self.desc_text = tk.Text(f, width=30, height=2, wrap=tk.WORD)
+        self.desc_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.desc_text.tag_configure('link', foreground='#1565C0', underline=True)
+        self._desc_links = {}
+        self.desc_text.bind('<ButtonRelease-3>', self._desc_right_click)
+        desc_content = existing.get("description", "") if existing else ""
+        self._load_desc(desc_content)
+
+        # === SECTION 2: How Often ===
+        freq_frame = ttk.LabelFrame(c, text="How Often", padding="5")
+        freq_frame.pack(fill=tk.X, pady=6)
+
+        tr = ttk.Frame(freq_frame); tr.pack(fill=tk.X, pady=2)
+        ttk.Label(tr, text="Repeat:").pack(side=tk.LEFT, padx=(0, 5))
+        self.type_var = tk.StringVar(value=rule.get("type", "yearly"))
+        ttk.OptionMenu(tr, self.type_var, self.type_var.get(), "yearly", "monthly", "interval").pack(side=tk.LEFT, padx=2)
+        self.type_var.trace_add('write', lambda *a: self._update_fields())
+
+        self._freq_detail_frame = ttk.Frame(freq_frame)
+        self._freq_detail_frame.pack(fill=tk.X, pady=2)
+
+        # Every N (yearly/monthly)
+        self._every_frame = ttk.Frame(self._freq_detail_frame)
+        ttk.Label(self._every_frame, text="Every").pack(side=tk.LEFT, padx=(0, 4))
+        self.every_n_var = tk.IntVar(value=rule.get("every_n", 1))
+        ttk.Spinbox(self._every_frame, from_=1, to=9999, width=5, textvariable=self.every_n_var).pack(side=tk.LEFT, padx=2)
+        self.every_n_label = ttk.Label(self._every_frame, text="years")
+        self.every_n_label.pack(side=tk.LEFT, padx=2)
+
+        # In month (yearly only)
+        self._month_frame = ttk.Frame(self._freq_detail_frame)
+        ttk.Label(self._month_frame, text="in month").pack(side=tk.LEFT, padx=(0, 4))
+        self.month_var = tk.IntVar(value=rule.get("month", 1))
+        ttk.Spinbox(self._month_frame, from_=1, to=month_count, width=5, textvariable=self.month_var).pack(side=tk.LEFT, padx=2)
+
+        # Interval days
+        self._interval_frame = ttk.Frame(self._freq_detail_frame)
+        ttk.Label(self._interval_frame, text="Every").pack(side=tk.LEFT, padx=(0, 4))
+        self.interval_var = tk.IntVar(value=rule.get("interval_days", 30))
+        ttk.Spinbox(self._interval_frame, from_=1, to=999999, width=7, textvariable=self.interval_var).pack(side=tk.LEFT, padx=2)
+        ttk.Label(self._interval_frame, text="days from start date").pack(side=tk.LEFT, padx=2)
+
+        # === SECTION 3: When (which day does it occur) ===
+        when_frame = ttk.LabelFrame(c, text="When (which day)", padding="5")
+        when_frame.pack(fill=tk.X, pady=6)
+
+        # Day mode selection
+        has_occurrence = "occurrence" in rule
+        self.day_mode_var = tk.StringVar(value="day_of_week" if has_occurrence else "day_of_month")
+
+        self._dom_frame = ttk.Frame(when_frame)
+        self._dom_frame.pack(fill=tk.X, pady=2)
+        ttk.Radiobutton(self._dom_frame, text="On day", variable=self.day_mode_var,
+                       value="day_of_month", command=self._update_fields).pack(side=tk.LEFT)
+        self.dom_var = tk.IntVar(value=rule.get("day_of_month", 1))
+        ttk.Spinbox(self._dom_frame, from_=1, to=day_count, width=4, textvariable=self.dom_var).pack(side=tk.LEFT, padx=4)
+        ttk.Label(self._dom_frame, text="of the month").pack(side=tk.LEFT)
+
+        self._dow_frame = ttk.Frame(when_frame)
+        self._dow_frame.pack(fill=tk.X, pady=2)
+        ttk.Radiobutton(self._dow_frame, text="The", variable=self.day_mode_var,
+                       value="day_of_week", command=self._update_fields).pack(side=tk.LEFT)
+        self.occ_var = tk.StringVar(value=rule.get("occurrence", "1st"))
+        ttk.OptionMenu(self._dow_frame, self.occ_var, self.occ_var.get(), "1st", "2nd", "3rd", "4th", "last").pack(side=tk.LEFT, padx=2)
+        self.dow_var = tk.IntVar(value=rule.get("day_of_week", 1))
+        ttk.Spinbox(self._dow_frame, from_=1, to=dow_count, width=4, textvariable=self.dow_var).pack(side=tk.LEFT, padx=2)
+        ttk.Label(self._dow_frame, text="(day-of-week) of the month").pack(side=tk.LEFT)
+
+        # Duration
+        dur_frame = ttk.Frame(when_frame)
+        dur_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(dur_frame, text="Duration:").pack(side=tk.LEFT, padx=(2, 4))
+        self.duration_var = tk.IntVar(value=existing.get("duration_days", 1) if existing else 1)
+        ttk.Spinbox(dur_frame, from_=1, to=999, width=4, textvariable=self.duration_var).pack(side=tk.LEFT, padx=2)
+        ttk.Label(dur_frame, text="day(s)").pack(side=tk.LEFT)
+
+        # === SECTION 4: Active Period ===
+        period_frame = ttk.LabelFrame(c, text="Active Period", padding="5")
+        period_frame.pack(fill=tk.X, pady=6)
+
+        is_epochal = config_data.get("bc_ad_enabled", False)
+
+        # Start
+        sf = ttk.Frame(period_frame); sf.pack(fill=tk.X, pady=2)
+        ttk.Label(sf, text="From:", width=6).pack(side=tk.LEFT)
+        self.start_age_var = tk.IntVar(value=start.get("age", 1) if start else config_data.get("last_position", {}).get("age", 1))
+        self.start_year_var = tk.IntVar(value=start.get("year", 1) if start else 1)
+        self.start_month_var = tk.IntVar(value=start.get("month", 1) if start else 1)
+        self.start_dom_var = tk.IntVar(value=start.get("day_of_month", 1) if start else 1)
+        if not is_epochal:
+            ttk.Label(sf, text="Age").pack(side=tk.LEFT, padx=1)
+            ttk.Spinbox(sf, from_=1, to=age_count, width=3, textvariable=self.start_age_var).pack(side=tk.LEFT, padx=1)
+            self.start_age_var.trace_add('write', lambda *a: self._update_year_ranges())
+        ttk.Label(sf, text="Y").pack(side=tk.LEFT, padx=1)
+        if is_epochal:
+            bc_years = config_data.get("bc_years", 100)
+            ad_years = config_data.get("ad_years", 100)
+            self._start_year_spin = ttk.Spinbox(sf, from_=-bc_years, to=ad_years, width=6, textvariable=self.start_year_var)
+        else:
+            start_years = config_data["time_units"]["ages"].get("years_per_age", {}).get(str(self.start_age_var.get()), 100)
+            self._start_year_spin = ttk.Spinbox(sf, from_=1, to=start_years, width=6, textvariable=self.start_year_var)
+        self._start_year_spin.pack(side=tk.LEFT, padx=1)
+        ttk.Label(sf, text="M").pack(side=tk.LEFT, padx=1)
+        ttk.Spinbox(sf, from_=1, to=month_count, width=3, textvariable=self.start_month_var).pack(side=tk.LEFT, padx=1)
+        ttk.Label(sf, text="D").pack(side=tk.LEFT, padx=1)
+        ttk.Spinbox(sf, from_=1, to=day_count, width=3, textvariable=self.start_dom_var).pack(side=tk.LEFT, padx=1)
+
+        # End (required)
+        ef = ttk.Frame(period_frame); ef.pack(fill=tk.X, pady=2)
+        ttk.Label(ef, text="Until:", width=6).pack(side=tk.LEFT)
+        if is_epochal:
+            default_end_year = config_data.get("ad_years", 100)
+        else:
+            cur_age = config_data.get("last_position", {}).get("age", 1)
+            cur_age_years = config_data["time_units"]["ages"].get("years_per_age", {}).get(str(cur_age), 100)
+            default_end_year = cur_age_years
+        self.end_age_var = tk.IntVar(value=end.get("age", cur_age if not is_epochal else 1) if end else (cur_age if not is_epochal else 1))
+        self.end_year_var = tk.IntVar(value=end.get("year", default_end_year) if end else default_end_year)
+        self.end_month_var = tk.IntVar(value=end.get("month", month_count) if end else month_count)
+        self.end_dom_var = tk.IntVar(value=end.get("day_of_month", day_count) if end else day_count)
+        if not is_epochal:
+            ttk.Label(ef, text="Age").pack(side=tk.LEFT, padx=1)
+            ttk.Spinbox(ef, from_=1, to=age_count, width=3, textvariable=self.end_age_var).pack(side=tk.LEFT, padx=1)
+            self.end_age_var.trace_add('write', lambda *a: self._update_year_ranges())
+        ttk.Label(ef, text="Y").pack(side=tk.LEFT, padx=1)
+        if is_epochal:
+            self._end_year_spin = ttk.Spinbox(ef, from_=-bc_years, to=ad_years, width=6, textvariable=self.end_year_var)
+        else:
+            end_years = config_data["time_units"]["ages"].get("years_per_age", {}).get(str(self.end_age_var.get()), 100)
+            self._end_year_spin = ttk.Spinbox(ef, from_=1, to=end_years, width=6, textvariable=self.end_year_var)
+        self._end_year_spin.pack(side=tk.LEFT, padx=1)
+        ttk.Label(ef, text="M").pack(side=tk.LEFT, padx=1)
+        ttk.Spinbox(ef, from_=1, to=month_count, width=3, textvariable=self.end_month_var).pack(side=tk.LEFT, padx=1)
+        ttk.Label(ef, text="D").pack(side=tk.LEFT, padx=1)
+        ttk.Spinbox(ef, from_=1, to=day_count, width=3, textvariable=self.end_dom_var).pack(side=tk.LEFT, padx=1)
+
+        # Buttons
+        bf = ttk.Frame(c); bf.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(bf, text="OK", command=self._ok).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(bf, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=5)
+
+        self._update_fields()
+
+    def _update_year_ranges(self):
+        """Update year spinbox ranges based on selected age's years_per_age."""
+        ages_data = self.config_data["time_units"]["ages"]
+        start_age = self.start_age_var.get()
+        start_max = ages_data.get("years_per_age", {}).get(str(start_age), 100)
+        self._start_year_spin.config(to=start_max)
+        if self.start_year_var.get() > start_max:
+            self.start_year_var.set(start_max)
+
+        end_age = self.end_age_var.get()
+        end_max = ages_data.get("years_per_age", {}).get(str(end_age), 100)
+        self._end_year_spin.config(to=end_max)
+        if self.end_year_var.get() > end_max:
+            self.end_year_var.set(end_max)
+
+    def _load_desc(self, content):
+        """Load description with [[path|display]] links rendered."""
+        pos = 0
+        while pos < len(content):
+            m = LINK_REGEX.search(content[pos:])
+            if m:
+                if m.start() > 0:
+                    self.desc_text.insert(tk.END, content[pos:pos + m.start()])
+                path = m.group(1)
+                display = m.group(2) if m.group(2) else path.split('/')[-1]
+                self._desc_links[display] = path
+                self.desc_text.insert(tk.END, display, ('link',))
+                pos += m.end()
+            else:
+                self.desc_text.insert(tk.END, content[pos:])
+                break
+
+    def _desc_right_click(self, event):
+        idx = self.desc_text.index(f"@{event.x},{event.y}")
+        menu = tk.Menu(self, tearoff=0)
+        if 'link' in self.desc_text.tag_names(idx):
+            menu.add_command(label="Remove Link", command=lambda: self._remove_desc_link(idx))
+            menu.add_separator()
+        menu.add_command(label="Insert Link", command=self._insert_desc_link)
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _remove_desc_link(self, idx):
+        lr = self.desc_text.tag_prevrange('link', f"{idx}+1c") or self.desc_text.tag_nextrange('link', idx)
+        if lr and self.desc_text.compare(lr[0], '<=', idx) and self.desc_text.compare(lr[1], '>=', idx):
+            display = self.desc_text.get(lr[0], lr[1])
+            self.desc_text.tag_remove('link', lr[0], lr[1])
+            self._desc_links.pop(display, None)
+
+    def _insert_desc_link(self):
+        # Walk up: self -> RecurringEventsDialog -> TimelineEditor
+        controller = None
+        p = self.master
+        while p:
+            if hasattr(p, 'controller') and p.controller:
+                controller = p.controller
+                break
+            p = getattr(p, 'master', None) if not isinstance(p, tk.Tk) else None
+        if not controller:
+            return
+        picker = VFSFilePicker(self, controller.vfs, controller.root_name)
+        if not picker.result:
+            return
+        path = picker.result
+        try:
+            display = self.desc_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.desc_text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            display = path.split('/')[-1]
+        self._desc_links[display] = path
+        self.desc_text.insert(tk.INSERT, display, ('link',))
+
+    def _get_desc_content(self):
+        """Serialize description with links as [[path|display]]."""
+        content = ""
+        index = "1.0"
+        end = self.desc_text.index(tk.END + "-1c")
+        while self.desc_text.compare(index, "<", end):
+            link_range = self.desc_text.tag_nextrange('link', index)
+            if link_range:
+                if self.desc_text.compare(index, "<", link_range[0]):
+                    content += self.desc_text.get(index, link_range[0])
+                display = self.desc_text.get(link_range[0], link_range[1])
+                path = self._desc_links.get(display, display)
+                content += f"[[{path}|{display}]]"
+                index = link_range[1]
+            else:
+                content += self.desc_text.get(index, end)
+                break
+        return content.strip()
+
+    def _estimate_days(self, time_data):
+        """Estimate cumulative days for a date (for validation)."""
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        age = time_data.get("age", 1)
+        year = time_data.get("year", 1)
+        month = time_data.get("month", 1)
+        dom = time_data.get("day_of_month", 1)
+        cumulative_years = 0
+        for a in range(1, age):
+            cumulative_years += self.config_data["time_units"]["ages"].get("years_per_age", {}).get(str(a), 100)
+        return ((cumulative_years + year - 1) * months_per_year * days_per_month +
+                (month - 1) * days_per_month + (dom - 1))
+
+    def _update_fields(self):
+        """Show/hide fields based on recurrence type."""
+        rtype = self.type_var.get()
+        labels = {"yearly": "years", "monthly": "months", "interval": "days"}
+        self.every_n_label.config(text=labels.get(rtype, ""))
+
+        # Hide all optional frames first
+        self._every_frame.pack_forget()
+        self._month_frame.pack_forget()
+        self._interval_frame.pack_forget()
+
+        if rtype == "yearly":
+            self._every_frame.pack(fill=tk.X, pady=2)
+            self._month_frame.pack(fill=tk.X, pady=2)
+        elif rtype == "monthly":
+            self._every_frame.pack(fill=tk.X, pady=2)
+        elif rtype == "interval":
+            self._interval_frame.pack(fill=tk.X, pady=2)
+
+        # Show/hide day selection based on type (not needed for interval)
+        if rtype == "interval":
+            self._dom_frame.pack_forget()
+            self._dow_frame.pack_forget()
+        else:
+            self._dom_frame.pack(fill=tk.X, pady=2)
+            self._dow_frame.pack(fill=tk.X, pady=2)
+
+    def _ok(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Name is required.", parent=self)
+            return
+
+        rtype = self.type_var.get()
+        rule = {"type": rtype}
+
+        if rtype in ("yearly", "monthly"):
+            rule["every_n"] = self.every_n_var.get()
+            if rtype == "yearly":
+                rule["month"] = self.month_var.get()
+            if self.day_mode_var.get() == "day_of_month":
+                rule["day_of_month"] = self.dom_var.get()
+            else:
+                rule["occurrence"] = self.occ_var.get()
+                rule["day_of_week"] = self.dow_var.get()
+        elif rtype == "interval":
+            rule["interval_days"] = self.interval_var.get()
+
+        start = {"age": self.start_age_var.get(), "year": self.start_year_var.get(),
+                 "month": self.start_month_var.get(), "day_of_month": self.start_dom_var.get()}
+        end = {"age": self.end_age_var.get(), "year": self.end_year_var.get(),
+               "month": self.end_month_var.get(), "day_of_month": self.end_dom_var.get()}
+
+        # Validate end is after start and estimate occurrence count
+        days_per_month = self.config_data["time_units"]["days_of_month"]["count"]
+        months_per_year = self.config_data["time_units"]["months"]["count"]
+        start_days = self._estimate_days(start)
+        end_days = self._estimate_days(end)
+        if end_days <= start_days:
+            messagebox.showerror("Error", "End date must be after start date.", parent=self)
+            return
+
+        # Estimate occurrences
+        total_days = end_days - start_days
+        if rtype == "yearly":
+            every_n = rule.get("every_n", 1)
+            est = total_days // (every_n * months_per_year * days_per_month) + 1
+        elif rtype == "monthly":
+            every_n = rule.get("every_n", 1)
+            est = total_days // (every_n * days_per_month) + 1
+        elif rtype == "interval":
+            est = total_days // rule.get("interval_days", 1) + 1
+        else:
+            est = 0
+
+        if est > 10000:
+            messagebox.showerror("Error", f"This would create ~{est:,} occurrences. "
+                               f"Please reduce the date range or increase the interval.", parent=self)
+            return
+        elif est > 1000:
+            if not messagebox.askyesno("Warning", f"This will create ~{est:,} occurrences. "
+                                      f"This may slow down the timeline. Continue?", parent=self):
+                return
+
+        self.result = {
+            "name": name,
+            "description": self._get_desc_content(),
+            "duration_days": self.duration_var.get(),
+            "rule": rule,
+            "start": start,
+            "end": end
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class EventCreationDialog(tk.Toplevel):
     """Modal dialog for structured input of a single timeline event."""
     def __init__(self, parent, initial_data=None):
@@ -5067,8 +6817,36 @@ class ImageViewer(ttk.Frame):
         self._fit_btn = ttk.Button(toolbar, text="Full Size", command=self._toggle_fit)
         self._fit_btn.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self, text="Right-click: place/edit pins & labels | Shift+drag: reposition",
-                 font=('Helvetica', 8), foreground='gray').pack(fill=tk.X, padx=5)
+        # Help tooltip
+        help_btn = ttk.Label(toolbar, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT, padx=5)
+        _help_text = (
+            "Controls:\n"
+            "  Right-click — Place/edit pins & labels\n"
+            "  Shift+Drag — Reposition pins & labels\n"
+            "  Hover pin — Show note (after 800ms)\n"
+            "  Click pin link — Open linked file\n\n"
+            "Pin options (right-click menu):\n"
+            "  Place Pin / Place Label\n"
+            "  Edit / Delete pin or label\n"
+            "  Open linked file"
+        )
+        _help_tip = [None]
+        def _show_help(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 300}+{e.y_root + 20}")
+            tk.Label(tip, text=_help_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _help_tip[0] = tip
+        def _hide_help(e):
+            if _help_tip[0]:
+                _help_tip[0].destroy()
+                _help_tip[0] = None
+        help_btn.bind("<Enter>", _show_help)
+        help_btn.bind("<Leave>", _hide_help)
 
         # Scrollable canvas
         canvas_frame = ttk.Frame(self)
@@ -5892,12 +7670,45 @@ class CSVGrid(ttk.Frame):
         return value
 
     def _setup_grid_ui(self):
-        # Hotkey legend
+        # Help tooltip
         legend_frame = ttk.Frame(self.grid_container)
         legend_frame.pack(fill=tk.X, pady=(0, 5))
         
-        legend_text = "Hotkeys: Type=Edit Cell | Tab=Next Cell | Del=Clear Cell | Space=Toggle Checkbox | Arrow Keys=Navigate | Esc=Cancel Edit"
-        ttk.Label(legend_frame, text=legend_text, font=('Helvetica', 8), foreground='gray').pack()
+        help_btn = ttk.Label(legend_frame, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT)
+        _help_text = (
+            "Hotkeys:\n"
+            "  Type — Edit cell\n"
+            "  Tab — Next cell\n"
+            "  Enter — Edit selected cell\n"
+            "  Delete — Clear cell\n"
+            "  Space — Toggle checkbox\n"
+            "  Arrow keys — Navigate\n"
+            "  Escape — Cancel edit\n\n"
+            "Controls:\n"
+            "  Double-click — Edit cell\n"
+            "  Double-click header — Rename column\n"
+            "  Right-click cell — Row options / Link\n"
+            "  Right-click header — Column options\n"
+            "  Drag header — Reorder columns\n"
+            "  Drag row — Reorder rows"
+        )
+        _help_tip = [None]
+        def _show_help(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 300}+{e.y_root + 20}")
+            tk.Label(tip, text=_help_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _help_tip[0] = tip
+        def _hide_help(e):
+            if _help_tip[0]:
+                _help_tip[0].destroy()
+                _help_tip[0] = None
+        help_btn.bind("<Enter>", _show_help)
+        help_btn.bind("<Leave>", _hide_help)
         
         tree_frame = ttk.Frame(self.grid_container)
         tree_frame.pack(fill=tk.BOTH, expand=True)
@@ -6960,6 +8771,1282 @@ class CSVGrid(ttk.Frame):
         full_data = [self.header] + all_rows_data
         
         return self._list_to_csv(full_data)
+
+
+class GraphEditor(ttk.Frame):
+    """A node-and-edge graph editor for relationship maps and flowcharts."""
+
+    NODE_RADIUS = 24
+    EDGE_ARROW_SIZE = 10
+
+    def __init__(self, master, initial_content="", controller=None):
+        super().__init__(master)
+        self.controller = controller
+        self._data = {"nodes": [], "edges": [], "view": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0}}
+        self._load_content(initial_content)
+
+        # Undo/redo
+        self._undo_stack = []
+        self._redo_stack = []
+        self._max_undo = 50
+
+        # Interaction state
+        self._drag_node_id = None
+        self._pan_start = None
+        self._connecting_from = None  # node id when drawing an edge
+        self._selected_nodes = set()
+        self._box_select_start = None  # (cx, cy) for box select
+        self._shift_toggled = None
+
+        # Toolbar
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(toolbar, text="Align H", command=self._align_horizontal).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Align V", command=self._align_vertical).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Zoom Fit", command=self._zoom_fit).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Manage Groups", command=self._manage_groups).pack(side=tk.LEFT, padx=2)
+
+        # Legend
+        # Help tooltip button
+        help_btn = ttk.Label(toolbar, text=" ? ", font=('Helvetica', 9, 'bold'),
+                            foreground='gray', relief='groove', padding=(4, 0))
+        help_btn.pack(side=tk.RIGHT, padx=5)
+        _help_text = (
+            "Controls:\n"
+            "  Click — Select node\n"
+            "  Shift+Click — Toggle selection\n"
+            "  Shift+Drag — Move selected nodes\n"
+            "  Box drag — Select multiple\n"
+            "  Ctrl+Click node — Start/end connection\n"
+            "  Ctrl+Click edge — Add junction\n"
+            "  Middle-drag — Pan view\n"
+            "  Scroll — Zoom\n"
+            "  Double-click — Edit node\n"
+            "  Right-click — Context menu\n\n"
+            "Hotkeys:\n"
+            "  Ctrl+Z — Undo\n"
+            "  Ctrl+Y — Redo\n"
+            "  Ctrl+C — Copy nodes\n"
+            "  Ctrl+V — Paste nodes\n"
+            "  Delete — Delete selected\n"
+            "  Escape — Cancel connection"
+        )
+        _help_tip = [None]
+        def _show_help(e):
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{e.x_root - 300}+{e.y_root + 20}")
+            tk.Label(tip, text=_help_text, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Courier', 9),
+                     justify=tk.LEFT, padx=8, pady=5).pack()
+            _help_tip[0] = tip
+        def _hide_help(e):
+            if _help_tip[0]:
+                _help_tip[0].destroy()
+                _help_tip[0] = None
+        help_btn.bind("<Enter>", _show_help)
+        help_btn.bind("<Leave>", _hide_help)
+
+        # Canvas
+        self.canvas = tk.Canvas(self, bg="#1e1e1e", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Bindings
+        self.canvas.bind('<Double-1>', self._on_double_click)
+        self.canvas.bind('<ButtonPress-1>', self._on_press)
+        self.canvas.bind('<B1-Motion>', self._on_drag)
+        self.canvas.bind('<ButtonRelease-1>', self._on_release)
+        self.canvas.bind('<ButtonPress-3>', self._on_right_click)
+        self.canvas.bind('<Control-ButtonPress-1>', self._on_ctrl_press)
+        self.canvas.bind('<Shift-ButtonPress-1>', self._on_shift_press)
+        self.canvas.bind('<Shift-B1-Motion>', self._on_shift_drag)
+        self.canvas.bind('<Shift-ButtonRelease-1>', self._on_shift_release)
+        self.canvas.bind('<ButtonPress-2>', self._on_pan_start)
+        self.canvas.bind('<B2-Motion>', self._on_pan_motion)
+        self.canvas.bind('<MouseWheel>', self._on_scroll)
+        self.canvas.bind('<Button-4>', lambda e: self._on_scroll_linux(e, 1))
+        self.canvas.bind('<Button-5>', lambda e: self._on_scroll_linux(e, -1))
+        self.canvas.bind('<Motion>', self._on_motion)
+        self.canvas.bind('<Delete>', self._on_delete_key)
+        self.canvas.bind('<Escape>', self._on_escape)
+        self.canvas.bind('<Control-z>', lambda e: self._undo())
+        self.canvas.bind('<Control-y>', lambda e: self._redo())
+        self.canvas.bind('<Control-c>', lambda e: self._copy_nodes())
+        self.canvas.bind('<Control-v>', lambda e: self._paste_nodes())
+
+        self._clipboard = []  # copied node dicts
+        self._tooltip = None
+        self._tooltip_target = None
+        self._tooltip_after = None
+        self._image_cache = {}  # (path, size, zoom) -> PhotoImage
+
+        self.after(50, self._redraw)
+
+    # --- Data ---
+
+    def _load_content(self, content):
+        if not content.strip():
+            return
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                self._data["nodes"] = data.get("nodes", [])
+                self._data["edges"] = data.get("edges", [])
+                self._data["view"] = data.get("view", {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0})
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    def get_content(self):
+        return json.dumps(self._data, indent=2)
+
+    def _push_undo(self):
+        """Save current state to undo stack."""
+        import copy
+        snapshot = copy.deepcopy({"nodes": self._data["nodes"], "edges": self._data["edges"]})
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        import copy
+        current = copy.deepcopy({"nodes": self._data["nodes"], "edges": self._data["edges"]})
+        self._redo_stack.append(current)
+        snapshot = self._undo_stack.pop()
+        self._data["nodes"] = snapshot["nodes"]
+        self._data["edges"] = snapshot["edges"]
+        self._selected_nodes.clear()
+        self._redraw()
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        import copy
+        current = copy.deepcopy({"nodes": self._data["nodes"], "edges": self._data["edges"]})
+        self._undo_stack.append(current)
+        snapshot = self._redo_stack.pop()
+        self._data["nodes"] = snapshot["nodes"]
+        self._data["edges"] = snapshot["edges"]
+        self._selected_nodes.clear()
+        self._redraw()
+
+    def _get_groups(self):
+        """Load groups from global config."""
+        if self.controller:
+            config = self.controller._load_config()
+            return config.get("graph_groups", [])
+        return []
+
+    def _node_by_id(self, node_id):
+        for n in self._data["nodes"]:
+            if n["id"] == node_id:
+                return n
+        return None
+
+    # --- Coordinate transforms ---
+
+    def _world_to_canvas(self, wx, wy):
+        view = self._data["view"]
+        zoom = view["zoom"]
+        cw = self.canvas.winfo_width() or 600
+        ch = self.canvas.winfo_height() or 400
+        cx = (wx + view["pan_x"]) * zoom + cw / 2
+        cy = (wy + view["pan_y"]) * zoom + ch / 2
+        return cx, cy
+
+    def _canvas_to_world(self, cx, cy):
+        view = self._data["view"]
+        zoom = view["zoom"]
+        cw = self.canvas.winfo_width() or 600
+        ch = self.canvas.winfo_height() or 400
+        wx = (cx - cw / 2) / zoom - view["pan_x"]
+        wy = (cy - ch / 2) / zoom - view["pan_y"]
+        return wx, wy
+
+    # --- Drawing ---
+
+    def _update_junction_positions(self):
+        """Recompute x/y for all junction nodes from their anchor edge."""
+        for node in self._data["nodes"]:
+            if node.get("type") != "junction" or "anchor_from" not in node:
+                continue
+            n1 = self._node_by_id(node["anchor_from"])
+            n2 = self._node_by_id(node["anchor_to"])
+            if n1 and n2:
+                # Check anchor edge still exists
+                anchor_exists = any(
+                    (e["from"] == node["anchor_from"] and e["to"] == node["anchor_to"]) or
+                    (e["from"] == node["anchor_to"] and e["to"] == node["anchor_from"])
+                    for e in self._data["edges"]
+                )
+                if anchor_exists:
+                    t = node.get("anchor_t", 0.5)
+                    node["x"] = n1["x"] + (n2["x"] - n1["x"]) * t
+                    node["y"] = n1["y"] + (n2["y"] - n1["y"]) * t
+
+    def _redraw(self):
+        self._update_junction_positions()
+        self.canvas.delete("all")
+        self._active_images = []  # hold PhotoImage refs to prevent GC
+        zoom = self._data["view"]["zoom"]
+        r = self.NODE_RADIUS * zoom
+
+        # Draw edges
+        for edge in self._data["edges"]:
+            n1 = self._node_by_id(edge["from"])
+            n2 = self._node_by_id(edge["to"])
+            if not n1 or not n2:
+                continue
+            x1, y1 = self._world_to_canvas(n1["x"], n1["y"])
+            x2, y2 = self._world_to_canvas(n2["x"], n2["y"])
+
+            # Shorten line to stop at node edge (smaller for junctions)
+            import math
+            dx, dy = x2 - x1, y2 - y1
+            dist = math.hypot(dx, dy)
+            if dist < 1:
+                continue
+            ux, uy = dx / dist, dy / dist
+            r1 = max(4, 6 * zoom) if n1.get("type") == "junction" else (n1.get("image_size", 48) * zoom / 2 if n1.get("shape") == "image" else r)
+            r2 = max(4, 6 * zoom) if n2.get("type") == "junction" else (n2.get("image_size", 48) * zoom / 2 if n2.get("shape") == "image" else r)
+            ax1, ay1 = x1 + ux * r1, y1 + uy * r1
+            ax2, ay2 = x2 - ux * r2, y2 - uy * r2
+
+            color = edge.get("color", "#888888")
+            style = edge.get("style", "solid")
+            dash = (6, 4) if style == "dashed" else None
+
+            if edge.get("bidirectional"):
+                self.canvas.create_line(ax1, ay1, ax2, ay2, fill=color, width=2, dash=dash,
+                                       arrow=tk.BOTH, arrowshape=(self.EDGE_ARROW_SIZE * zoom,
+                                                                   self.EDGE_ARROW_SIZE * zoom * 1.2,
+                                                                   self.EDGE_ARROW_SIZE * zoom * 0.4),
+                                       tags=("edge",))
+            elif edge.get("directed", False):
+                self.canvas.create_line(ax1, ay1, ax2, ay2, fill=color, width=2, dash=dash,
+                                       arrow=tk.LAST, arrowshape=(self.EDGE_ARROW_SIZE * zoom,
+                                                                   self.EDGE_ARROW_SIZE * zoom * 1.2,
+                                                                   self.EDGE_ARROW_SIZE * zoom * 0.4),
+                                       tags=("edge",))
+            else:
+                self.canvas.create_line(ax1, ay1, ax2, ay2, fill=color, width=2, dash=dash, tags=("edge",))
+
+            # Edge label at midpoint
+            label = edge.get("label", "")
+            mx, my = (ax1 + ax2) / 2, (ay1 + ay2) / 2
+            if label:
+                self.canvas.create_text(mx, my - 10 * zoom, text=label, fill="#cccccc",
+                                       font=('Helvetica', max(8, int(9 * zoom))), tags=("edge_label",))
+
+        # Draw nodes
+        for node in self._data["nodes"]:
+            cx, cy = self._world_to_canvas(node["x"], node["y"])
+            color = node.get("color", "#4CAF50")
+            outline = "#ffffff" if node["id"] not in self._selected_nodes else "#FFD700"
+            outline_w = 2 if node["id"] not in self._selected_nodes else 3
+            shape = node.get("shape", "circle")
+            group = node.get("group", "")
+
+            # Junction nodes are small dots
+            if node.get("type") == "junction":
+                jr = max(4, 6 * zoom)
+                self.canvas.create_oval(cx - jr, cy - jr, cx + jr, cy + jr,
+                                       fill=color, outline=outline, width=outline_w,
+                                       tags=("node", node["id"]))
+                continue
+
+            # Image nodes
+            if shape == "image" and node.get("image"):
+                photo = self._get_node_image(node, zoom)
+                if photo:
+                    if node["id"] in self._selected_nodes:
+                        hr = node.get("image_size", 48) * zoom / 2 + 3
+                        self.canvas.create_rectangle(cx - hr, cy - hr, cx + hr, cy + hr,
+                                                    outline="#FFD700", width=3, tags=("node", node["id"]))
+                    self.canvas.create_image(cx, cy, image=photo, anchor="center",
+                                           tags=("node", node["id"]))
+                else:
+                    self._draw_node_shape(cx, cy, r, "circle", color, outline, outline_w, node["id"])
+            else:
+                self._draw_node_shape(cx, cy, r, shape, color, outline, outline_w, node["id"])
+
+            # Label
+            label = node.get("label", "")
+            font_size = max(8, int(10 * zoom))
+            label_pos = node.get("label_pos", "below")
+            if label_pos == "center":
+                lx, ly = cx, cy
+            elif label_pos == "above":
+                lx, ly = cx, cy - r - 10 * zoom
+            elif label_pos == "left":
+                lx, ly = cx - r - 10 * zoom, cy
+            elif label_pos == "right":
+                lx, ly = cx + r + 10 * zoom, cy
+            else:  # below
+                lx, ly = cx, cy + r + 10 * zoom
+            anchor = "e" if label_pos == "left" else "w" if label_pos == "right" else "center"
+            text_color = self._contrast_color(color) if label_pos == "center" else "#ffffff"
+            self.canvas.create_text(lx, ly, text=label, fill=text_color, anchor=anchor,
+                                   font=('Helvetica', font_size, 'bold'), tags=("node_label",))
+            # Group label next to main label
+            if group:
+                if label_pos == "center":
+                    gx, gy = cx, cy + 12 * zoom
+                elif label_pos == "above":
+                    gx, gy = cx, ly - 12 * zoom
+                elif label_pos == "below":
+                    gx, gy = cx, ly + 12 * zoom
+                elif label_pos == "left":
+                    gx, gy = lx, ly + 12 * zoom
+                else:  # right
+                    gx, gy = lx, ly + 12 * zoom
+                self.canvas.create_text(gx, gy, text=group, fill="#aaaaaa", anchor=anchor,
+                                       font=('Helvetica', max(7, int(8 * zoom))), tags=("group_label",))
+
+        # Draw connection line in progress
+        if self._connecting_from and hasattr(self, '_connect_mouse_pos'):
+            n = self._node_by_id(self._connecting_from)
+            if n:
+                x1, y1 = self._world_to_canvas(n["x"], n["y"])
+                self.canvas.create_line(x1, y1, self._connect_mouse_pos[0], self._connect_mouse_pos[1],
+                                       fill="#FFD700", width=2, dash=(4, 4), tags=("connecting",))
+
+    NODE_SHAPES = ("circle", "rectangle", "diamond", "hexagon", "triangle", "star", "octagon", "pill")
+
+    @staticmethod
+    def _contrast_color(hex_color):
+        """Return black or white depending on background luminance."""
+        try:
+            h = hex_color.lstrip('#')
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+            return "#000000" if luminance > 0.5 else "#ffffff"
+        except (ValueError, IndexError):
+            return "#ffffff"
+
+    def _get_node_image(self, node, zoom):
+        """Load, scale, and cache a node's image. Returns PhotoImage or None."""
+        from PIL import Image, ImageTk
+        img_path = node.get("image", "")
+        size = node.get("image_size", 48)
+        scaled = max(8, int(size * zoom))
+        cache_key = (img_path, scaled)
+        if cache_key in self._image_cache:
+            self._active_images.append(self._image_cache[cache_key])
+            return self._image_cache[cache_key]
+        # Resolve path relative to save file
+        save_dir = None
+        if self.controller and self.controller.file_path:
+            save_dir = os.path.dirname(os.path.abspath(self.controller.file_path))
+        if not save_dir:
+            return None
+        abs_path = os.path.normpath(os.path.join(save_dir, img_path))
+        if not os.path.isfile(abs_path):
+            return None
+        try:
+            img = Image.open(abs_path).convert("RGBA")
+            img = img.resize((scaled, scaled), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self._image_cache[cache_key] = photo
+            self._active_images.append(photo)
+            return photo
+        except Exception:
+            return None
+
+    def _draw_node_shape(self, cx, cy, r, shape, fill, outline, outline_w, node_id):
+        """Draw a node with the given shape."""
+        import math
+        tags = ("node", node_id)
+        if shape == "rectangle":
+            self.canvas.create_rectangle(cx - r, cy - r * 0.7, cx + r, cy + r * 0.7,
+                                        fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "diamond":
+            pts = [cx, cy - r, cx + r, cy, cx, cy + r, cx - r, cy]
+            self.canvas.create_polygon(pts, fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "hexagon":
+            pts = []
+            for i in range(6):
+                angle = math.radians(60 * i - 30)
+                pts.extend([cx + r * math.cos(angle), cy + r * math.sin(angle)])
+            self.canvas.create_polygon(pts, fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "triangle":
+            pts = [cx, cy - r, cx + r, cy + r * 0.7, cx - r, cy + r * 0.7]
+            self.canvas.create_polygon(pts, fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "star":
+            pts = []
+            for i in range(10):
+                angle = math.radians(36 * i - 90)
+                rad = r if i % 2 == 0 else r * 0.5
+                pts.extend([cx + rad * math.cos(angle), cy + rad * math.sin(angle)])
+            self.canvas.create_polygon(pts, fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "octagon":
+            pts = []
+            for i in range(8):
+                angle = math.radians(45 * i - 22.5)
+                pts.extend([cx + r * math.cos(angle), cy + r * math.sin(angle)])
+            self.canvas.create_polygon(pts, fill=fill, outline=outline, width=outline_w, tags=tags)
+        elif shape == "pill":
+            # Rounded rectangle / capsule
+            rh = r * 0.6
+            self.canvas.create_arc(cx - r, cy - rh, cx - r + rh * 2, cy + rh, start=90, extent=180,
+                                  fill=fill, outline=outline, width=outline_w, style='pieslice', tags=tags)
+            self.canvas.create_arc(cx + r - rh * 2, cy - rh, cx + r, cy + rh, start=-90, extent=180,
+                                  fill=fill, outline=outline, width=outline_w, style='pieslice', tags=tags)
+            self.canvas.create_rectangle(cx - r + rh, cy - rh, cx + r - rh, cy + rh,
+                                        fill=fill, outline=fill, width=0, tags=tags)
+            self.canvas.create_line(cx - r + rh, cy - rh, cx + r - rh, cy - rh,
+                                   fill=outline, width=outline_w, tags=tags)
+            self.canvas.create_line(cx - r + rh, cy + rh, cx + r - rh, cy + rh,
+                                   fill=outline, width=outline_w, tags=tags)
+        else:  # circle
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                   fill=fill, outline=outline, width=outline_w, tags=tags)
+
+    # --- Hit testing ---
+
+    def _node_at(self, cx, cy):
+        zoom = self._data["view"]["zoom"]
+        r = self.NODE_RADIUS * zoom
+        for node in reversed(self._data["nodes"]):
+            nx, ny = self._world_to_canvas(node["x"], node["y"])
+            if node.get("shape") == "image" and node.get("image"):
+                hr = node.get("image_size", 48) * zoom / 2
+            else:
+                hr = r
+            if (cx - nx) ** 2 + (cy - ny) ** 2 <= hr ** 2:
+                return node
+        return None
+
+    def _edge_at(self, cx, cy):
+        """Returns the edge at canvas position, or None."""
+        import math
+        zoom = self._data["view"]["zoom"]
+        threshold = 8 * zoom
+
+        for edge in self._data["edges"]:
+            n1 = self._node_by_id(edge["from"])
+            n2 = self._node_by_id(edge["to"])
+            if not n1 or not n2:
+                continue
+            x1, y1 = self._world_to_canvas(n1["x"], n1["y"])
+            x2, y2 = self._world_to_canvas(n2["x"], n2["y"])
+            dx, dy = x2 - x1, y2 - y1
+            seg_len = math.hypot(dx, dy)
+            if seg_len < 1:
+                continue
+            t = max(0, min(1, ((cx - x1) * dx + (cy - y1) * dy) / (seg_len ** 2)))
+            proj_x, proj_y = x1 + t * dx, y1 + t * dy
+            if math.hypot(cx - proj_x, cy - proj_y) <= threshold:
+                return edge
+        return None
+
+    # --- Events ---
+
+    def _on_motion(self, event):
+        if self._connecting_from:
+            self._connect_mouse_pos = (event.x, event.y)
+            self._redraw()
+            return
+
+        # Tooltip logic
+        node = self._node_at(event.x, event.y)
+        edge = self._edge_at(event.x, event.y) if not node else None
+        target = None
+        desc = ""
+        if node and node.get("description"):
+            target = node["id"]
+            desc = node["description"]
+        elif edge and edge.get("description"):
+            target = (edge["from"], edge["to"])
+            desc = edge["description"]
+
+        if target == self._tooltip_target:
+            return
+
+        # Cancel pending tooltip
+        if self._tooltip_after:
+            self.after_cancel(self._tooltip_after)
+            self._tooltip_after = None
+        if self._tooltip:
+            self._tooltip.destroy()
+            self._tooltip = None
+        self._tooltip_target = target
+
+        if not desc:
+            return
+
+        def show():
+            tip = tk.Toplevel(self)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+            tk.Label(tip, text=desc, background="#ffffe0", foreground="#000000",
+                     relief="solid", borderwidth=1, font=('Helvetica', 9),
+                     justify=tk.LEFT, wraplength=250).pack()
+            self._tooltip = tip
+
+        self._tooltip_after = self.after(500, show)
+
+    def _on_double_click(self, event):
+        node = self._node_at(event.x, event.y)
+        if node:
+            if node.get("type") == "junction":
+                return
+            self._edit_node(node)
+
+    def _on_press(self, event):
+        self.canvas.focus_set()
+        if event.state & 0x1:  # Shift held — drag
+            return
+        if event.state & 0x4:  # Ctrl held — connect
+            return
+        node = self._node_at(event.x, event.y)
+        if node:
+            self._selected_nodes = {node["id"]}
+            self._box_select_start = None
+        else:
+            if self._connecting_from:
+                self._connecting_from = None
+                self._redraw()
+                return
+            self._selected_nodes = set()
+            self._box_select_start = (event.x, event.y)
+        self._redraw()
+
+    def _on_ctrl_press(self, event):
+        """Ctrl+click to start/complete a connection. Ctrl+click on an edge creates a junction node."""
+        node = self._node_at(event.x, event.y)
+        if node:
+            if self._connecting_from:
+                if node["id"] != self._connecting_from:
+                    self._create_edge(self._connecting_from, node["id"])
+                self._connecting_from = None
+            else:
+                self._connecting_from = node["id"]
+                self._connect_mouse_pos = (event.x, event.y)
+        else:
+            edge = self._edge_at(event.x, event.y)
+            if edge:
+                # Create a junction node at the edge midpoint
+                junction = self._create_junction_on_edge(edge)
+                if self._connecting_from:
+                    # Complete connection to the new junction
+                    if junction["id"] != self._connecting_from:
+                        self._create_edge(self._connecting_from, junction["id"])
+                    self._connecting_from = None
+                else:
+                    # Start connecting from the new junction
+                    self._connecting_from = junction["id"]
+                    self._connect_mouse_pos = (event.x, event.y)
+            else:
+                self._connecting_from = None
+        self._redraw()
+
+    def _on_drag(self, event):
+        if self._connecting_from:
+            self._connect_mouse_pos = (event.x, event.y)
+            self._redraw()
+        elif self._box_select_start:
+            self._redraw()
+            x1, y1 = self._box_select_start
+            self.canvas.create_rectangle(x1, y1, event.x, event.y,
+                                        outline="#FFD700", width=1, dash=(4, 4), tags=("select_box",))
+
+    def _on_release(self, event):
+        if self._box_select_start:
+            x1, y1 = self._box_select_start
+            x2, y2 = event.x, event.y
+            min_x, max_x = min(x1, x2), max(x1, x2)
+            min_y, max_y = min(y1, y2), max(y1, y2)
+            for node in self._data["nodes"]:
+                cx, cy = self._world_to_canvas(node["x"], node["y"])
+                if min_x <= cx <= max_x and min_y <= cy <= max_y:
+                    self._selected_nodes.add(node["id"])
+            self._box_select_start = None
+            self._redraw()
+
+    def _on_shift_press(self, event):
+        """Shift+click to toggle node selection and start drag."""
+        node = self._node_at(event.x, event.y)
+        if node:
+            # Toggle selection, remember so we can undo on drag
+            if node["id"] in self._selected_nodes:
+                self._selected_nodes.discard(node["id"])
+                self._shift_toggled = ("removed", node["id"])
+            else:
+                self._selected_nodes.add(node["id"])
+                self._shift_toggled = ("added", node["id"])
+            self._drag_node_id = node["id"]
+            self._drag_last_pos = (event.x, event.y)
+            self.canvas.config(cursor="fleur")
+            self._redraw()
+        else:
+            self._shift_toggled = None
+
+    def _on_shift_drag(self, event):
+        """Shift+drag to reposition all selected nodes."""
+        # Reverse the toggle on first drag motion (user intended drag, not select)
+        if self._shift_toggled:
+            action, nid = self._shift_toggled
+            if action == "added":
+                self._selected_nodes.discard(nid)
+            else:
+                self._selected_nodes.add(nid)
+            # Ensure dragged node is selected for dragging
+            if self._drag_node_id:
+                self._selected_nodes.add(self._drag_node_id)
+            self._shift_toggled = None
+            self._push_undo()
+        if self._drag_node_id and self._selected_nodes:
+            dx = event.x - self._drag_last_pos[0]
+            dy = event.y - self._drag_last_pos[1]
+            zoom = self._data["view"]["zoom"]
+            for node in self._data["nodes"]:
+                if node["id"] not in self._selected_nodes:
+                    continue
+                if node.get("type") == "junction" and "anchor_from" in node:
+                    # Project onto parent edge to update t
+                    n1 = self._node_by_id(node["anchor_from"])
+                    n2 = self._node_by_id(node["anchor_to"])
+                    if n1 and n2:
+                        # Compute new world position
+                        wx = node["x"] + dx / zoom
+                        wy = node["y"] + dy / zoom
+                        # Project onto edge line
+                        ex, ey = n2["x"] - n1["x"], n2["y"] - n1["y"]
+                        seg_len_sq = ex * ex + ey * ey
+                        if seg_len_sq > 0:
+                            t = max(0.0, min(1.0, ((wx - n1["x"]) * ex + (wy - n1["y"]) * ey) / seg_len_sq))
+                            node["anchor_t"] = t
+                else:
+                    node["x"] += dx / zoom
+                    node["y"] += dy / zoom
+            self._drag_last_pos = (event.x, event.y)
+            self._redraw()
+
+    def _on_shift_release(self, event):
+        """End node drag."""
+        self._drag_node_id = None
+        self._shift_toggled = None
+        self.canvas.config(cursor="")
+
+    def _on_escape(self, event):
+        """Cancel connection in progress."""
+        if self._connecting_from:
+            self._connecting_from = None
+            self._redraw()
+
+    def _copy_nodes(self):
+        """Copy selected nodes to clipboard."""
+        import copy
+        if not self._selected_nodes:
+            return
+        self._clipboard = [copy.deepcopy(n) for n in self._data["nodes"]
+                          if n["id"] in self._selected_nodes and n.get("type") != "junction"]
+
+    def _paste_nodes(self):
+        """Paste copied nodes with offset and new IDs."""
+        import copy
+        if not self._clipboard:
+            return
+        self._push_undo()
+        new_ids = {}
+        for node in self._clipboard:
+            new_node = copy.deepcopy(node)
+            old_id = new_node["id"]
+            new_node["id"] = str(uuid.uuid4())
+            new_node["x"] += 50
+            new_node["y"] += 50
+            new_ids[old_id] = new_node["id"]
+            self._data["nodes"].append(new_node)
+        self._selected_nodes = set(new_ids.values())
+        self._redraw()
+
+    def _on_delete_key(self, event):
+        """Delete all selected nodes."""
+        if not self._selected_nodes:
+            return
+        count = len(self._selected_nodes)
+        if not messagebox.askyesno("Delete Nodes", f"Delete {count} selected node(s)?"):
+            return
+        self._push_undo()
+        self._data["nodes"] = [n for n in self._data["nodes"] if n["id"] not in self._selected_nodes]
+        self._data["edges"] = [e for e in self._data["edges"]
+                              if e["from"] not in self._selected_nodes and e["to"] not in self._selected_nodes]
+        self._selected_nodes = set()
+        self._redraw()
+
+    def _on_pan_start(self, event):
+        self._pan_start = (event.x, event.y)
+
+    def _on_pan_motion(self, event):
+        if self._pan_start:
+            dx = event.x - self._pan_start[0]
+            dy = event.y - self._pan_start[1]
+            zoom = self._data["view"]["zoom"]
+            self._data["view"]["pan_x"] += dx / zoom
+            self._data["view"]["pan_y"] += dy / zoom
+            self._pan_start = (event.x, event.y)
+            self._redraw()
+
+    def _on_scroll(self, event):
+        factor = 1.1 if event.delta > 0 else 0.9
+        self._data["view"]["zoom"] = max(0.1, min(5.0, self._data["view"]["zoom"] * factor))
+        self._redraw()
+
+    def _on_scroll_linux(self, event, direction):
+        factor = 1.1 if direction > 0 else 0.9
+        self._data["view"]["zoom"] = max(0.1, min(5.0, self._data["view"]["zoom"] * factor))
+        self._redraw()
+
+    def _on_right_click(self, event):
+        node = self._node_at(event.x, event.y)
+        edge = self._edge_at(event.x, event.y) if not node else None
+
+        menu = tk.Menu(self, tearoff=0)
+
+        if node:
+            if node.get("link") and self.controller:
+                menu.add_command(label=f"Open: {node['label']}", command=lambda: self.controller._open_file_editor(node["link"].split('/')))
+                menu.add_separator()
+            if node.get("type") == "junction":
+                menu.add_command(label="Delete Junction", command=lambda: self._delete_node(node["id"]))
+            else:
+                menu.add_command(label="Edit Node", command=lambda: self._edit_node(node))
+                menu.add_separator()
+                menu.add_command(label="Delete Node", command=lambda: self._delete_node(node["id"]))
+        elif edge:
+            menu.add_command(label="Edit Connection", command=lambda: self._edit_edge(edge))
+            menu.add_command(label="Reverse Direction", command=lambda: self._reverse_edge(edge))
+            menu.add_separator()
+            menu.add_command(label="Delete Connection", command=lambda: self._delete_edge(edge))
+        else:
+            wx, wy = self._canvas_to_world(event.x, event.y)
+            menu.add_command(label="Add Node Here", command=lambda: self._add_node_at(wx, wy))
+
+        popup_menu(menu, event.x_root, event.y_root)
+
+    # --- Node CRUD ---
+
+    def _add_node_at(self, wx, wy):
+        node = {"id": str(uuid.uuid4()), "label": "New Node", "x": wx, "y": wy,
+                "color": "#4CAF50", "group": "", "link": ""}
+        dialog = GraphNodeDialog(self, node, self._get_groups(), self.controller)
+        if dialog.result:
+            self._push_undo()
+            self._data["nodes"].append(dialog.result)
+            self._redraw()
+
+    def _edit_node(self, node):
+        dialog = GraphNodeDialog(self, node, self._get_groups(), self.controller)
+        if dialog.result:
+            self._push_undo()
+            idx = next(i for i, n in enumerate(self._data["nodes"]) if n["id"] == node["id"])
+            self._data["nodes"][idx] = dialog.result
+            self._redraw()
+
+    def _delete_node(self, node_id):
+        node = self._node_by_id(node_id)
+        if not node:
+            return
+        if not messagebox.askyesno("Delete Node", f"Delete node '{node.get('label', '')}'?"):
+            return
+        self._push_undo()
+        self._data["nodes"] = [n for n in self._data["nodes"] if n["id"] != node_id]
+        self._data["edges"] = [e for e in self._data["edges"] if e["from"] != node_id and e["to"] != node_id]
+        self._redraw()
+
+    # --- Edge CRUD ---
+
+    def _create_junction_on_edge(self, edge):
+        """Create a junction node anchored to an edge. Returns the junction node."""
+        self._push_undo()
+        n1 = self._node_by_id(edge["from"])
+        n2 = self._node_by_id(edge["to"])
+        junction = {"id": str(uuid.uuid4()), "type": "junction", "label": "",
+                    "x": (n1["x"] + n2["x"]) / 2, "y": (n1["y"] + n2["y"]) / 2,
+                    "color": "#888888",
+                    "anchor_from": edge["from"], "anchor_to": edge["to"], "anchor_t": 0.5}
+        self._data["nodes"].append(junction)
+        return junction
+
+    def _create_edge(self, from_id, to_id):
+        # Check if edge already exists
+        for e in self._data["edges"]:
+            if e["from"] == from_id and e["to"] == to_id:
+                return
+            if not e.get("directed") and e["from"] == to_id and e["to"] == from_id:
+                return
+        edge = {"from": from_id, "to": to_id, "label": "", "directed": False,
+                "color": "#888888", "style": "solid"}
+        dialog = GraphEdgeDialog(self, edge)
+        if dialog.result:
+            self._push_undo()
+            self._data["edges"].append(dialog.result)
+            self._redraw()
+
+    def _edit_edge(self, edge):
+        dialog = GraphEdgeDialog(self, edge)
+        if dialog.result:
+            self._push_undo()
+            idx = self._data["edges"].index(edge)
+            self._data["edges"][idx] = dialog.result
+            self._redraw()
+
+    def _reverse_edge(self, edge):
+        self._push_undo()
+        edge["from"], edge["to"] = edge["to"], edge["from"]
+        self._redraw()
+
+    def _delete_edge(self, edge):
+        if not messagebox.askyesno("Delete Connection", f"Delete connection '{edge.get('label', '')}'?"):
+            return
+        self._push_undo()
+        self._data["edges"].remove(edge)
+        self._cleanup_dead_junctions()
+        self._redraw()
+
+    def _cleanup_dead_junctions(self):
+        """Remove junctions with no connected edges, and edges missing a node."""
+        changed = True
+        while changed:
+            changed = False
+            node_ids = {n["id"] for n in self._data["nodes"]}
+            # Remove edges not connected to 2 existing nodes/junctions
+            new_edges = [e for e in self._data["edges"] if e["from"] in node_ids and e["to"] in node_ids]
+            if len(new_edges) != len(self._data["edges"]):
+                self._data["edges"] = new_edges
+                changed = True
+            # Remove junctions with no connected edges
+            for node in list(self._data["nodes"]):
+                if node.get("type") != "junction":
+                    continue
+                nid = node["id"]
+                if not any(e["from"] == nid or e["to"] == nid for e in self._data["edges"]):
+                    self._data["nodes"].remove(node)
+                    changed = True
+
+    # --- Layout ---
+
+    def _align_horizontal(self):
+        """Align all selected nodes to the same Y coordinate (first selected node's Y)."""
+        if len(self._selected_nodes) < 2:
+            return
+        self._push_undo()
+        target_y = None
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes:
+                target_y = node["y"]
+                break
+        if target_y is None:
+            return
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes:
+                if node.get("type") == "junction" and "anchor_from" in node:
+                    self._align_junction(node, node["x"], target_y)
+                else:
+                    node["y"] = target_y
+        self._redraw()
+        self.canvas.focus_set()
+
+    def _align_vertical(self):
+        """Align all selected nodes to the same X coordinate (first selected node's X)."""
+        if len(self._selected_nodes) < 2:
+            return
+        self._push_undo()
+        target_x = None
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes:
+                target_x = node["x"]
+                break
+        if target_x is None:
+            return
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes:
+                if node.get("type") == "junction" and "anchor_from" in node:
+                    self._align_junction(node, target_x, node["y"])
+                else:
+                    node["x"] = target_x
+        self._redraw()
+        self.canvas.focus_set()
+
+    def _align_junction(self, node, wx, wy):
+        """Project desired world position onto the junction's anchor edge and update anchor_t."""
+        n1 = self._node_by_id(node["anchor_from"])
+        n2 = self._node_by_id(node["anchor_to"])
+        if not n1 or not n2:
+            return
+        ex, ey = n2["x"] - n1["x"], n2["y"] - n1["y"]
+        seg_len_sq = ex * ex + ey * ey
+        if seg_len_sq > 0:
+            t = max(0.0, min(1.0, ((wx - n1["x"]) * ex + (wy - n1["y"]) * ey) / seg_len_sq))
+            node["anchor_t"] = t
+
+    def _zoom_fit(self):
+        if not self._data["nodes"]:
+            return
+        xs = [n["x"] for n in self._data["nodes"]]
+        ys = [n["y"] for n in self._data["nodes"]]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span_x = max_x - min_x or 100
+        span_y = max_y - min_y or 100
+        cw = self.canvas.winfo_width() or 600
+        ch = self.canvas.winfo_height() or 400
+        zoom = min(cw / (span_x + 100), ch / (span_y + 100))
+        zoom = max(0.1, min(5.0, zoom))
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        self._data["view"]["zoom"] = zoom
+        self._data["view"]["pan_x"] = -center_x
+        self._data["view"]["pan_y"] = -center_y
+        self._redraw()
+
+    # --- Groups ---
+
+    def _manage_groups(self):
+        """Open dialog to delete individual unused groups."""
+        if not self.controller:
+            return
+        # Save current editor content to VFS so scan picks up latest state
+        self.controller._save_editor_content_to_vfs()
+        groups = self._get_groups()
+        if not groups:
+            messagebox.showinfo("Manage Groups", "No groups defined.")
+            return
+
+        # Find which groups are in use
+        used = set()
+        self._scan_node_groups(self.controller.vfs.get(self.controller.root_name, {}), used)
+
+        dialog = tk.Toplevel(self)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.title("Manage Groups")
+        dialog.geometry("300x300")
+
+        ttk.Label(dialog, text="Select a group to delete.\nGroups in use are protected.",
+                 font=('Helvetica', 9)).pack(padx=10, pady=5)
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        listbox = tk.Listbox(frame, width=30)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(frame, command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for g in groups:
+            suffix = " (in use)" if g["name"] in used else ""
+            listbox.insert(tk.END, f"{g['name']}{suffix}")
+            listbox.itemconfig(tk.END, fg=g.get("color", "#ffffff"))
+
+        def delete_selected():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            g = groups[idx]
+            if g["name"] in used:
+                messagebox.showwarning("Cannot Delete", f"'{g['name']}' is in use by active nodes.", parent=dialog)
+                return
+            if not messagebox.askyesno("Delete Group", f"Delete group '{g['name']}'?", parent=dialog):
+                return
+            groups.pop(idx)
+            config = self.controller._load_config()
+            config["graph_groups"] = groups
+            try:
+                with open(self.controller.CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+            except Exception:
+                pass
+            listbox.delete(idx)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="Delete", command=delete_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Done", command=dialog.destroy).pack(side=tk.RIGHT, padx=2)
+
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.wait_window()
+
+    def _scan_node_groups(self, node, used_groups):
+        """Recursively scan VFS for .graph files and collect group names from their nodes."""
+        if node.get("type") == "file":
+            content = node.get("content", "")
+            if not content:
+                return
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and "nodes" in data:
+                    for n in data["nodes"]:
+                        g = n.get("group", "")
+                        if g:
+                            used_groups.add(g)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        elif node.get("type") == "dir":
+            for child in node.get("children", {}).values():
+                self._scan_node_groups(child, used_groups)
+
+
+class GraphNodeDialog(tk.Toplevel):
+    """Dialog for editing a graph node."""
+    def __init__(self, parent, node, groups, controller=None):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Edit Node")
+        self.result = None
+        self.controller = controller
+        self._groups = groups
+        self.geometry("380x400")
+
+        self._id = node.get("id", str(uuid.uuid4()))
+        self._x = node.get("x", 0)
+        self._y = node.get("y", 0)
+
+        ttk.Label(self, text="Label:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        self.label_var = tk.StringVar(value=node.get("label", ""))
+        ttk.Entry(self, textvariable=self.label_var, width=28).grid(row=0, column=1, sticky="ew", padx=10, pady=5)
+
+        ttk.Label(self, text="Description:").grid(row=1, column=0, sticky="nw", padx=10, pady=5)
+        self.desc_text = tk.Text(self, width=28, height=2)
+        self.desc_text.grid(row=1, column=1, sticky="ew", padx=10, pady=5)
+        self.desc_text.insert("1.0", node.get("description", ""))
+
+        ttk.Label(self, text="Shape:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        self.shape_var = tk.StringVar(value=node.get("shape", "circle"))
+        ttk.OptionMenu(self, self.shape_var, self.shape_var.get(),
+                      "circle", "rectangle", "diamond", "hexagon", "triangle", "star", "octagon", "pill", "image").grid(row=2, column=1, sticky="w", padx=10, pady=5)
+
+        self._img_label = ttk.Label(self, text="Image:")
+        self._img_label.grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        img_frame = ttk.Frame(self)
+        img_frame.grid(row=3, column=1, sticky="ew", padx=10, pady=5)
+        self._img_frame = img_frame
+        self.image_var = tk.StringVar(value=node.get("image", ""))
+        ttk.Entry(img_frame, textvariable=self.image_var, width=18).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(img_frame, text="Browse", command=self._browse_image).pack(side=tk.LEFT, padx=(5, 0))
+
+        self._imgsize_label = ttk.Label(self, text="Image Size:")
+        self._imgsize_label.grid(row=4, column=0, sticky="w", padx=10, pady=5)
+        self.image_size_var = tk.IntVar(value=node.get("image_size", 48))
+        self._imgsize_spinbox = ttk.Spinbox(self, from_=16, to=256, width=6, textvariable=self.image_size_var)
+        self._imgsize_spinbox.grid(row=4, column=1, sticky="w", padx=10, pady=5)
+
+        self.shape_var.trace_add('write', lambda *a: self._toggle_image_fields())
+        self._toggle_image_fields()
+
+        ttk.Label(self, text="Label Position:").grid(row=5, column=0, sticky="w", padx=10, pady=5)
+        self.label_pos_var = tk.StringVar(value=node.get("label_pos", "below"))
+        ttk.OptionMenu(self, self.label_pos_var, self.label_pos_var.get(),
+                      "center", "below", "above", "left", "right").grid(row=5, column=1, sticky="w", padx=10, pady=5)
+
+        ttk.Label(self, text="Group:").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+        group_names = [""] + [g["name"] for g in groups] if groups else [""]
+        self.group_var = tk.StringVar(value=node.get("group", ""))
+        self.group_var.trace_add('write', self._on_group_change)
+        group_combo = ttk.Combobox(self, textvariable=self.group_var, values=group_names, width=25)
+        group_combo.grid(row=6, column=1, sticky="ew", padx=10, pady=5)
+
+        ttk.Label(self, text="Color:").grid(row=7, column=0, sticky="w", padx=10, pady=5)
+        color_frame = ttk.Frame(self)
+        color_frame.grid(row=7, column=1, sticky="ew", padx=10, pady=5)
+        self.color_var = tk.StringVar(value=node.get("color", "#4CAF50"))
+        self.color_preview = tk.Label(color_frame, width=3, bg=self.color_var.get())
+        self.color_preview.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(color_frame, text="Choose", command=self._pick_color).pack(side=tk.LEFT)
+
+        ttk.Label(self, text="Link (VFS):").grid(row=8, column=0, sticky="w", padx=10, pady=5)
+        link_frame = ttk.Frame(self)
+        link_frame.grid(row=8, column=1, sticky="ew", padx=10, pady=5)
+        self.link_var = tk.StringVar(value=node.get("link", ""))
+        ttk.Entry(link_frame, textvariable=self.link_var, width=18).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(link_frame, text="Pick", command=self._pick_link).pack(side=tk.LEFT, padx=(5, 0))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
+
+        self.columnconfigure(1, weight=1)
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self.wait_window(self)
+
+    def _on_group_change(self, *args):
+        """Auto-set node color to match group color, or create new group."""
+        group_name = self.group_var.get().strip()
+        if not group_name:
+            return
+        # Find existing group
+        for g in self._groups:
+            if g["name"] == group_name:
+                self.color_var.set(g["color"])
+                self.color_preview.config(bg=g["color"])
+                return
+
+    def _pick_color(self):
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(initialcolor=self.color_var.get(), parent=self)
+        if color[1]:
+            self.color_var.set(color[1])
+            self.color_preview.config(bg=color[1])
+
+    def _pick_link(self):
+        if not self.controller:
+            return
+        picker = VFSFilePicker(self, self.controller.vfs, self.controller.root_name)
+        if picker.result:
+            self.link_var.set(picker.result)
+
+    def _toggle_image_fields(self):
+        if self.shape_var.get() == "image":
+            self._img_label.grid()
+            self._img_frame.grid()
+            self._imgsize_label.grid()
+            self._imgsize_spinbox.grid()
+        else:
+            self._img_label.grid_remove()
+            self._img_frame.grid_remove()
+            self._imgsize_label.grid_remove()
+            self._imgsize_spinbox.grid_remove()
+            self.image_var.set("")
+
+    def _browse_image(self):
+        save_dir = None
+        if self.controller and self.controller.file_path:
+            save_dir = os.path.dirname(os.path.abspath(self.controller.file_path))
+        filepath = filedialog.askopenfilename(
+            initialdir=save_dir,
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("All Files", "*.*")],
+            title="Select Node Image", parent=self)
+        if filepath and save_dir:
+            self.image_var.set(os.path.relpath(filepath, save_dir))
+            self.shape_var.set("image")
+        elif filepath:
+            self.image_var.set(filepath)
+            self.shape_var.set("image")
+
+    def _ok(self):
+        label = self.label_var.get().strip()
+        if not label:
+            messagebox.showerror("Error", "Label is required.", parent=self)
+            return
+        group_name = self.group_var.get().strip()
+        color = self.color_var.get()
+        # Auto-create group if it's new
+        if group_name and not any(g["name"] == group_name for g in self._groups):
+            self._groups.append({"name": group_name, "color": color})
+            # Save to global config
+            if self.controller:
+                config = self.controller._load_config()
+                config["graph_groups"] = self._groups
+                try:
+                    with open(self.controller.CONFIG_FILE, 'w') as f:
+                        json.dump(config, f, indent=2)
+                except Exception:
+                    pass
+        self.result = {
+            "id": self._id, "label": label,
+            "description": self.desc_text.get("1.0", tk.END).strip(),
+            "x": self._x, "y": self._y,
+            "shape": self.shape_var.get(),
+            "image": self.image_var.get().strip(),
+            "image_size": self.image_size_var.get(),
+            "label_pos": self.label_pos_var.get(),
+            "color": color,
+            "group": group_name,
+            "link": self.link_var.get().strip()
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class GraphEdgeDialog(tk.Toplevel):
+    """Dialog for editing a graph edge."""
+    def __init__(self, parent, edge):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Edit Connection")
+        self.result = None
+        self.geometry("350x250")
+
+        self._from = edge["from"]
+        self._to = edge["to"]
+
+        ttk.Label(self, text="Label:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        self.label_var = tk.StringVar(value=edge.get("label", ""))
+        ttk.Entry(self, textvariable=self.label_var, width=25).grid(row=0, column=1, sticky="ew", padx=10, pady=5)
+
+        ttk.Label(self, text="Description:").grid(row=1, column=0, sticky="nw", padx=10, pady=5)
+        self.desc_text = tk.Text(self, width=25, height=2)
+        self.desc_text.grid(row=1, column=1, sticky="ew", padx=10, pady=5)
+        self.desc_text.insert("1.0", edge.get("description", ""))
+
+        ttk.Label(self, text="Direction:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        # Determine current direction mode
+        if edge.get("bidirectional"):
+            dir_val = "Bidirectional"
+        elif edge.get("directed", True):
+            dir_val = "Directed"
+        else:
+            dir_val = "Undirected"
+        self.direction_var = tk.StringVar(value=dir_val)
+        ttk.OptionMenu(self, self.direction_var, dir_val, "Undirected", "Directed", "Bidirectional").grid(row=2, column=1, sticky="w", padx=10, pady=5)
+
+        ttk.Label(self, text="Style:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        self.style_var = tk.StringVar(value=edge.get("style", "solid"))
+        ttk.OptionMenu(self, self.style_var, self.style_var.get(), "solid", "dashed").grid(row=3, column=1, sticky="w", padx=10, pady=5)
+
+        ttk.Label(self, text="Color:").grid(row=4, column=0, sticky="w", padx=10, pady=5)
+        color_frame = ttk.Frame(self)
+        color_frame.grid(row=4, column=1, sticky="ew", padx=10, pady=5)
+        self.color_var = tk.StringVar(value=edge.get("color", "#888888"))
+        self.color_preview = tk.Label(color_frame, width=3, bg=self.color_var.get())
+        self.color_preview.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(color_frame, text="Choose", command=self._pick_color).pack(side=tk.LEFT)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
+
+        self.columnconfigure(1, weight=1)
+        self.bind('<Return>', lambda e: self._ok())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self.wait_window(self)
+
+    def _pick_color(self):
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(initialcolor=self.color_var.get(), parent=self)
+        if color[1]:
+            self.color_var.set(color[1])
+            self.color_preview.config(bg=color[1])
+
+    def _ok(self):
+        d = self.direction_var.get()
+        self.result = {
+            "from": self._from, "to": self._to,
+            "label": self.label_var.get().strip(),
+            "description": self.desc_text.get("1.0", tk.END).strip(),
+            "directed": d in ("Directed", "Bidirectional"),
+            "bidirectional": d == "Bidirectional",
+            "color": self.color_var.get(),
+            "style": self.style_var.get()
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
 
 
 if __name__ == '__main__':
