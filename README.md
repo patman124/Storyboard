@@ -294,7 +294,7 @@ Your world (saved anywhere)/
 - pyspellchecker
 
 ```bash
-pip install Pillow pyspellchecker
+pip install Pillow pyspellchecker tksheet
 python storyboard.py
 ```
 
