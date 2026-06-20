@@ -6,6 +6,7 @@ import os
 import sys
 import uuid
 from spellchecker import SpellChecker
+from tksheet import Sheet
 
 if sys.platform == 'win32':
     import ctypes
@@ -133,9 +134,17 @@ class WorldBuilderArchive(tk.Tk):
         self._populate_vfs_tree()
         
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self.bind_all('<Control-s>', lambda e: self.save_world())
+        
+        # Monitor active editor for changes (detects modifications immediately)
+        self._mod_check_after = None
+        self._blink_state = True
+        self._start_mod_monitor()
         
         # Prompt to reopen last file (deferred so mainloop is running and focus works)
         self.after(100, self._prompt_reopen_last_file)
+        self._auto_save_after = None
+        self._restart_auto_save()
 
     # --- Config File Management ---
 
@@ -169,6 +178,15 @@ class WorldBuilderArchive(tk.Tk):
                 self.state('zoomed')  # Windows
             except tk.TclError:
                 self.attributes('-zoomed', True)  # Linux
+        
+        # Restore VFS panel width
+        vfs_ratio = config.get("vfs_panel_ratio")
+        if vfs_ratio:
+            def restore_sash():
+                total = self.main_pane.winfo_width()
+                if total > 0:
+                    self.main_pane.sashpos(0, int(vfs_ratio * total))
+            self.after(200, restore_sash)
         
         behavior = config.get("reopen_behavior", "ask")
         if behavior == "never":
@@ -240,47 +258,70 @@ class WorldBuilderArchive(tk.Tk):
     
     def _on_closing(self):
         """Executes final save operations before closing, only if VFS is modified."""
+        # Save pane width
+        if self._vfs_panel_visible:
+            self._save_vfs_width()
         # CRITICAL: Always save the latest editor content to VFS before checking save status
         self._save_editor_content_to_vfs() 
         
         # NEW: Only check if the VFS state has been modified since the last save/load.
         if self._is_vfs_modified():
             if self.file_path:
-                # If a file is already open/saved, prompt to save changes
-                if messagebox.askyesno("Save on Exit", f"Do you want to save changes to '{os.path.basename(self.file_path)}' before exiting?"):
+                result = messagebox.askyesnocancel("Save on Exit",
+                    f"Do you want to save changes to '{os.path.basename(self.file_path)}' before exiting?")
+                if result is None:  # Cancel
+                    return
+                if result:  # Yes
                     self.save_world()
             else:
-                # If VFS is modified but never saved, prompt for save as
-                if messagebox.askyesno("Save on Exit", "Your current world is unsaved. Would you like to save it before exiting?"):
+                result = messagebox.askyesnocancel("Save on Exit",
+                    "Your current world is unsaved. Would you like to save it before exiting?")
+                if result is None:  # Cancel
+                    return
+                if result:  # Yes
                     self.save_world_as()
 
         self.destroy()
+
+    def _restart_auto_save(self):
+        """Start or restart the auto-save timer based on config."""
+        if self._auto_save_after:
+            self.after_cancel(self._auto_save_after)
+            self._auto_save_after = None
+        config = self._load_config()
+        if config.get("auto_save_enabled", False):
+            interval = config.get("auto_save_interval", 60) * 1000
+            self._auto_save_after = self.after(interval, self._do_auto_save)
+
+    def _do_auto_save(self):
+        """Auto-save if there are unsaved changes and a file path exists."""
+        if self.file_path and self._is_vfs_modified():
+            self._save_editor_content_to_vfs()
+            self._write_vfs_to_disk(self.file_path)
+            self.title(f"Storyboard - {self.root_name} (Auto-saved)")
+            self.after(2000, lambda: self.title(f"Storyboard - {self.root_name}"))
+        # Schedule next check
+        config = self._load_config()
+        if config.get("auto_save_enabled", False):
+            interval = config.get("auto_save_interval", 60) * 1000
+            self._auto_save_after = self.after(interval, self._do_auto_save)
 
     def _open_settings(self):
         """Open the settings dialog."""
         SettingsDialog(self)
 
     def _get_bookmarks(self):
-        """Get bookmarks list for the current world file."""
-        if not self.file_path:
-            return []
-        config = self._load_config()
-        bookmarks = config.get("bookmarks", {})
-        return bookmarks.get(self.file_path, [])
+        """Get bookmarks list from the VFS root node."""
+        root = self.vfs.get(self.root_name)
+        if root:
+            return root.get("bookmarks", [])
+        return []
 
     def _save_bookmarks(self, bookmark_list):
-        """Save bookmarks for the current world file."""
-        if not self.file_path:
-            return
-        config = self._load_config()
-        if "bookmarks" not in config:
-            config["bookmarks"] = {}
-        config["bookmarks"][self.file_path] = bookmark_list
-        try:
-            with open(self.CONFIG_FILE, 'w') as f:
-                json.dump(config, f, indent=2)
-        except Exception:
-            pass
+        """Save bookmarks to the VFS root node."""
+        root = self.vfs.get(self.root_name)
+        if root:
+            root["bookmarks"] = bookmark_list
 
     def _add_bookmark(self, path_string):
         """Add a file path to bookmarks."""
@@ -308,17 +349,26 @@ class WorldBuilderArchive(tk.Tk):
 
     def _update_bookmark_button(self):
         """Show/update the bookmark toggle button on the right side of the tab bar."""
-        # Remove old bookmark button if exists
+        # Remove old buttons
         if hasattr(self, '_bookmark_btn') and self._bookmark_btn:
             self._bookmark_btn.destroy()
             self._bookmark_btn = None
+        if hasattr(self, '_backlinks_toggle_btn') and self._backlinks_toggle_btn:
+            self._backlinks_toggle_btn.destroy()
+            self._backlinks_toggle_btn = None
         if self.active_file_path:
             ps = self._get_path_string(self.active_file_path)
             is_bookmarked = ps in self._get_bookmarks()
             star = "★" if is_bookmarked else "☆"
+            # Backlinks button first (packs right, so it appears after bookmark)
+            arrow = "▶" if self._backlinks_visible else "◀"
+            self._backlinks_toggle_btn = ttk.Button(self._tab_bar, text=arrow, width=2,
+                                                   command=self._toggle_backlinks)
+            self._backlinks_toggle_btn.pack(side=tk.RIGHT, padx=1)
+            # Bookmark button
             self._bookmark_btn = ttk.Button(self._tab_bar, text=star, width=2,
                                            command=lambda: self._toggle_bookmark(ps))
-            self._bookmark_btn.pack(side=tk.RIGHT, padx=3)
+            self._bookmark_btn.pack(side=tk.RIGHT, padx=1)
 
     def _show_bookmarks(self):
         """Show bookmarks dropdown menu."""
@@ -333,6 +383,11 @@ class WorldBuilderArchive(tk.Tk):
                                command=lambda p=path_str: self._open_file_editor(p.split('/')))
         # Position below the bookmarks button
         menu.tk_popup(self.winfo_rootx() + 120, self.winfo_rooty() + 30)
+
+    def _open_global_find(self):
+        """Open the global find/replace dialog."""
+        self._save_editor_content_to_vfs()
+        GlobalFindReplaceDialog(self)
 
     def _clear_bookmarks(self):
         """Clear all bookmarks."""
@@ -353,6 +408,14 @@ class WorldBuilderArchive(tk.Tk):
                 
             # NEW: Update the last saved state upon successful write
             self._update_saved_state()
+            self._modified_files.clear()
+            # Reset tree icons
+            for item in self._get_all_tree_items():
+                if 'modified' in self.vfs_tree.item(item, 'tags'):
+                    values = self.vfs_tree.item(item, 'values')
+                    if values:
+                        self._update_tree_modified_indicator(values[0], False)
+            self._rebuild_tab_bar()
             self._save_config(filepath)
             self.title(f"Storyboard - {self.root_name} (Saved)") 
         except Exception as e:
@@ -1058,9 +1121,17 @@ class WorldBuilderArchive(tk.Tk):
             if path_string not in matching_paths:
                 return
             node_type = node_data.get("type", "dir")
-            icon = self.folder_icon if node_type == "dir" else self.file_icon
+            if node_type == "dir":
+                icon = self.folder_icon
+            else:
+                ext = node_name.rsplit('.', 1)[-1].lower() if '.' in node_name else ""
+                icon = {"table": self.table_icon, "timeline": self.timeline_icon,
+                        "image": self.image_icon, "graph": self.graph_icon}.get(ext, self.file_icon)
 
-            item_id = self.vfs_tree.insert(parent_id, 'end', text=node_name, image=icon, tags=("node",))
+            display_name = node_name
+            if path_string in self._modified_files:
+                icon = self.modified_icon
+            item_id = self.vfs_tree.insert(parent_id, 'end', text=display_name, image=icon, tags=("node",))
             self.vfs_tree.item(item_id, values=(path_string,))
 
             if node_type == "dir" and "children" in node_data:
@@ -1085,6 +1156,154 @@ class WorldBuilderArchive(tk.Tk):
         self._search_var.set("")
         self._search_entry.selection_clear()
 
+    # --- File Tags ---
+
+    def _get_all_tags(self):
+        """Collect all unique tags from all file nodes in the VFS."""
+        tags = set()
+        def walk(node):
+            if node.get("type") == "file":
+                for t in node.get("tags", []):
+                    tags.add(t)
+            elif node.get("type") == "dir":
+                for child in node.get("children", {}).values():
+                    walk(child)
+        root = self.vfs.get(self.root_name)
+        if root:
+            walk(root)
+        return sorted(tags)
+
+    def _refresh_tag_list(self):
+        """Update internal tag list (called after tag edits)."""
+        pass  # Tags are read dynamically from _get_all_tags()
+
+    def _show_tag_filter_menu(self):
+        """Show a checkbutton menu for multi-tag filtering."""
+        all_tags = self._get_all_tags()
+        if not all_tags:
+            return
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Clear All", command=self._clear_tag_filters)
+        menu.add_separator()
+        self._tag_check_vars = {}
+        for tag in all_tags:
+            var = tk.BooleanVar(value=tag in self._active_tag_filters)
+            self._tag_check_vars[tag] = var
+            menu.add_checkbutton(label=tag, variable=var,
+                               command=self._apply_tag_filter)
+        btn = self._tag_filter_btn
+        menu.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+
+    def _clear_tag_filters(self):
+        """Clear all tag filters."""
+        self._active_tag_filters.clear()
+        self._tag_filter_btn.config(text="All")
+        self._populate_vfs_tree()
+
+    def _edit_file_tags(self, path_list):
+        """Open dialog to edit tags on a file with checkboxes + new tag entry."""
+        node = self._get_file_node_reference(path_list)
+        if not node or node.get("type") != "file":
+            return
+        current_tags = set(node.get("tags", []))
+        all_tags = self._get_all_tags()
+
+        dialog = tk.Toplevel(self)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.title(f"Tags — {path_list[-1]}")
+        dialog.geometry("320x320")
+
+        ttk.Label(dialog, text="Select tags:", font=('Helvetica', 9, 'bold')).pack(anchor='w', padx=10, pady=(10, 5))
+
+        # OK / Cancel (pack first so they stay at bottom)
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="OK", command=lambda: ok()).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=3)
+
+        # New tag entry (pack before list so it stays visible)
+        new_frame = ttk.Frame(dialog)
+        new_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+        new_var = tk.StringVar()
+        entry = ttk.Entry(new_frame, textvariable=new_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+        # Scrollable checkbox list (fills remaining space)
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(list_frame, highlightthickness=0, width=250)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        tag_vars = {}
+        for tag in all_tags:
+            var = tk.BooleanVar(value=tag in current_tags)
+            tag_vars[tag] = var
+            ttk.Checkbutton(inner, text=tag, variable=var).pack(anchor='w')
+
+        def add_new_tag():
+            new_tag = new_var.get().strip()
+            if new_tag and new_tag not in tag_vars:
+                var = tk.BooleanVar(value=True)
+                tag_vars[new_tag] = var
+                ttk.Checkbutton(inner, text=new_tag, variable=var).pack(anchor='w')
+                new_var.set("")
+
+        ttk.Button(new_frame, text="+ New Tag", command=add_new_tag).pack(side=tk.LEFT)
+        entry.bind('<Return>', lambda e: add_new_tag())
+
+        def ok():
+            node["tags"] = [t for t, v in tag_vars.items() if v.get()]
+            dialog.destroy()
+            if self._active_tag_filters:
+                self._apply_tag_filter()
+            else:
+                self._populate_vfs_tree()
+
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.wait_window()
+
+    def _apply_tag_filter(self):
+        """Filter the VFS tree to show only files matching ALL selected tags."""
+        # Update active filters from check vars
+        self._active_tag_filters = {tag for tag, var in self._tag_check_vars.items() if var.get()}
+
+        if not self._active_tag_filters:
+            self._tag_filter_btn.config(text="All")
+            self._populate_vfs_tree()
+            return
+
+        self._tag_filter_btn.config(text=", ".join(sorted(self._active_tag_filters)))
+
+        # Find paths of files that have ALL selected tags
+        matching_paths = set()
+        def walk(node, path_list):
+            if node.get("type") == "file":
+                file_tags = set(node.get("tags", []))
+                if self._active_tag_filters.issubset(file_tags):
+                    for i in range(1, len(path_list) + 1):
+                        matching_paths.add(self._get_path_string(path_list[:i]))
+            elif node.get("type") == "dir":
+                for name, child in node.get("children", {}).items():
+                    walk(child, path_list + [name])
+        root = self.vfs.get(self.root_name)
+        if root:
+            walk(root, [self.root_name])
+            matching_paths.add(self._get_path_string([self.root_name]))
+
+        self._populate_vfs_tree_filtered(matching_paths)
+
     # --- UI Component Setup ---
         
     def _create_icons(self):
@@ -1100,7 +1319,7 @@ class WorldBuilderArchive(tk.Tk):
         d.polygon([(2, 5), (4, 2), (8, 2), (10, 5)], fill=icon_color)
         self.folder_icon = ImageTk.PhotoImage(folder_img)
         
-        # File Icon drawing
+        # File Icon drawing (default text)
         file_img = Image.new('RGBA', size, (0, 0, 0, 0))
         d = ImageDraw.Draw(file_img)
         d.polygon([(2, 2), (13, 2), (13, 14), (2, 14), (2, 2)], fill="white", outline=icon_color)
@@ -1109,6 +1328,55 @@ class WorldBuilderArchive(tk.Tk):
         d.line([(5, 8), (10, 8)], fill=icon_color)
         d.line([(5, 11), (10, 11)], fill=icon_color)
         self.file_icon = ImageTk.PhotoImage(file_img)
+
+        # Table Icon (grid)
+        table_img = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(table_img)
+        d.rectangle([2, 2, 13, 14], fill="#E8F5E9", outline="#388E3C")
+        d.line([(2, 6), (13, 6)], fill="#388E3C", width=1)
+        d.line([(2, 10), (13, 10)], fill="#388E3C", width=1)
+        d.line([(7, 2), (7, 14)], fill="#388E3C", width=1)
+        self.table_icon = ImageTk.PhotoImage(table_img)
+
+        # Timeline Icon (clock arrow)
+        timeline_img = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(timeline_img)
+        d.rectangle([2, 2, 13, 14], fill="#E3F2FD", outline="#1565C0")
+        d.line([(4, 8), (11, 8)], fill="#1565C0", width=2)
+        d.line([(9, 5), (11, 8), (9, 11)], fill="#1565C0", width=1)
+        d.ellipse([3, 5, 7, 9], fill="#1565C0")
+        self.timeline_icon = ImageTk.PhotoImage(timeline_img)
+
+        # Image Icon (landscape)
+        image_img = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(image_img)
+        d.rectangle([2, 3, 13, 13], fill="#FFF3E0", outline="#E65100")
+        d.polygon([(3, 12), (6, 8), (8, 10), (11, 6), (13, 12)], fill="#E65100")
+        d.ellipse([9, 4, 12, 7], fill="#FFB300")
+        self.image_icon = ImageTk.PhotoImage(image_img)
+
+        # Graph Icon (nodes and edges)
+        graph_img = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(graph_img)
+        d.rectangle([2, 2, 13, 14], fill="#F3E5F5", outline="#7B1FA2")
+        d.line([(5, 5), (10, 10)], fill="#7B1FA2", width=1)
+        d.line([(10, 5), (5, 10)], fill="#7B1FA2", width=1)
+        d.ellipse([3, 3, 7, 7], fill="#7B1FA2")
+        d.ellipse([8, 8, 12, 12], fill="#7B1FA2")
+        d.ellipse([8, 3, 12, 7], fill="#AB47BC")
+        d.ellipse([3, 8, 7, 12], fill="#AB47BC")
+        self.graph_icon = ImageTk.PhotoImage(graph_img)
+
+        # Modified indicator icons (two colors for blinking)
+        mod_img = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(mod_img)
+        d.ellipse([4, 4, 12, 12], fill="#FF5722")
+        self.modified_icon = ImageTk.PhotoImage(mod_img)
+
+        mod_img2 = Image.new('RGBA', size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(mod_img2)
+        d.ellipse([4, 4, 12, 12], fill="#882200")
+        self.modified_icon_dim = ImageTk.PhotoImage(mod_img2)
 
     def _apply_theme(self, theme=None):
         """Apply light or dark theme to the application."""
@@ -1158,9 +1426,24 @@ class WorldBuilderArchive(tk.Tk):
         style.configure("TScrollbar", background=heading_bg, troughcolor=bg)
         style.configure("TScale", background=bg, troughcolor=field_bg)
         style.configure("TMenubutton", background=heading_bg, foreground=fg)
-        style.map("Treeview", background=[("selected", select_bg)],
-                  foreground=[("selected", fg)])
+        style.map("Treeview", background=[("selected", select_bg)])
         style.map("TButton", background=[("active", select_bg)])
+
+        # Tab styles
+        if theme == "dark":
+            style.configure("ActiveTab.TButton", background="#1565C0", foreground="#ffffff",
+                           font=('Helvetica', 9, 'bold'))
+            style.map("ActiveTab.TButton", background=[("active", "#1976D2")])
+            style.configure("InactiveTab.TButton", background="#3c3c3c", foreground="#aaaaaa",
+                           font=('Helvetica', 9))
+            style.map("InactiveTab.TButton", background=[("active", "#505050")])
+        else:
+            style.configure("ActiveTab.TButton", background="#1976D2", foreground="#ffffff",
+                           font=('Helvetica', 9, 'bold'))
+            style.map("ActiveTab.TButton", background=[("active", "#1565C0")])
+            style.configure("InactiveTab.TButton", background="#e0e0e0", foreground="#555555",
+                           font=('Helvetica', 9))
+            style.map("InactiveTab.TButton", background=[("active", "#d0d0d0")])
 
     def _setup_layout(self):
         """Configures the main window layout."""
@@ -1170,7 +1453,8 @@ class WorldBuilderArchive(tk.Tk):
         top_bar.pack(fill=tk.X, padx=5, pady=(5, 0))
         
         ttk.Label(top_bar, text="Storyboard", font=('Helvetica', 12, 'bold')).pack(side=tk.LEFT)
-        ttk.Button(top_bar, text="★", width=3, command=self._show_bookmarks).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(top_bar, text="★ Favorites", command=self._show_bookmarks).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(top_bar, text="🔍 Find/Replace", command=self._open_global_find).pack(side=tk.LEFT, padx=(10, 0))
         
         gear_btn = ttk.Button(top_bar, text="⚙", width=3, command=self._open_settings)
         gear_btn.pack(side=tk.RIGHT)
@@ -1186,7 +1470,10 @@ class WorldBuilderArchive(tk.Tk):
         self.main_pane.add(self.left_frame, weight=10)
         
         self.path_var = tk.StringVar(value=self._get_path_string(self.current_path))
-        ttk.Label(self.left_frame, textvariable=self.path_var, font=('Helvetica', 10, 'bold'), anchor='w').pack(fill=tk.X, pady=(0, 5))
+        self.path_var.trace_add('write', lambda *a: self._update_breadcrumbs())
+        self._breadcrumb_frame = ttk.Frame(self.left_frame)
+        self._breadcrumb_frame.pack(fill=tk.X, pady=(0, 5))
+        self._update_breadcrumbs()
         
         # Search bar
         search_frame = ttk.Frame(self.left_frame)
@@ -1200,6 +1487,15 @@ class WorldBuilderArchive(tk.Tk):
         self._search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._search_entry.bind('<Escape>', lambda e: self._clear_vfs_search())
 
+        # Tag filter
+        tag_frame = ttk.Frame(self.left_frame)
+        tag_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(tag_frame, text="Tags:").pack(side=tk.LEFT, padx=(0, 3))
+        self._tag_filter_btn = ttk.Button(tag_frame, text="All", command=self._show_tag_filter_menu)
+        self._tag_filter_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._active_tag_filters = set()  # set of active tag strings
+        self._tag_check_vars = {}  # tag -> BooleanVar
+
         self._tree_frame = ttk.Frame(self.left_frame)
         self._tree_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -1211,6 +1507,11 @@ class WorldBuilderArchive(tk.Tk):
         self.vfs_tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         self.vfs_tree.bind('<Double-1>', self._on_tree_double_click)
         self.vfs_tree.bind('<ButtonRelease-3>', self._on_tree_right_click)
+        self.vfs_tree.bind('<Motion>', self._on_tree_hover)
+        self.vfs_tree.bind('<Leave>', self._on_tree_leave)
+        self._tree_tooltip = None
+        self._tree_hover_item = None
+        self._tree_hover_after = None
         
         # Drag-and-drop reordering
         self._drag_item = None
@@ -1221,8 +1522,13 @@ class WorldBuilderArchive(tk.Tk):
         self.vfs_tree.bind('<ButtonRelease-1>', self._on_drag_drop)
         
         tree_scroll = ttk.Scrollbar(self._tree_frame, orient=tk.VERTICAL, command=self.vfs_tree.yview)
-        self.vfs_tree.configure(yscrollcommand=tree_scroll.set)
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        def _auto_scroll(first, last):
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                tree_scroll.pack_forget()
+            else:
+                tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            tree_scroll.set(first, last)
+        self.vfs_tree.configure(yscrollcommand=_auto_scroll)
         
         # --- Right Panel ---
         self.right_frame = ttk.Frame(self.main_pane, padding="5 5 5 5")
@@ -1233,9 +1539,18 @@ class WorldBuilderArchive(tk.Tk):
         self._tab_bar.pack(fill=tk.X, pady=(0, 3))
         self._editor_area = ttk.Frame(self.right_frame)
         self._editor_area.pack(fill=tk.BOTH, expand=True)
+
+        # Backlinks panel (right side, collapsible)
+        self._backlinks_frame = ttk.Frame(self.main_pane, padding="5 5 5 5")
+        self._backlinks_visible = False
+        ttk.Label(self._backlinks_frame, text="What links here", font=('Helvetica', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        self._backlinks_list = ttk.Frame(self._backlinks_frame)
+        self._backlinks_list.pack(fill=tk.BOTH, expand=True)
         self._open_tabs = []  # list of path_lists
         self._tab_buttons = {}  # path_string -> button widget
         self._bookmark_btn = None
+        self._backlinks_toggle_btn = None
+        self._modified_files = set()  # path_strings of files with unsaved edits
         self._popped_out_files = {}  # path_string -> Toplevel window
         
         self._vfs_panel_visible = True
@@ -1265,14 +1580,19 @@ class WorldBuilderArchive(tk.Tk):
             if node_type == "dir":
                 icon = self.folder_icon
             else:
-                icon = self.file_icon
+                ext = node_name.rsplit('.', 1)[-1].lower() if '.' in node_name else ""
+                icon = {"table": self.table_icon, "timeline": self.timeline_icon,
+                        "image": self.image_icon, "graph": self.graph_icon}.get(ext, self.file_icon)
 
+            path_string = self._get_path_string(path_list)
+            if path_string in self._modified_files:
+                icon = self.modified_icon
             item_id = self.vfs_tree.insert(parent_id, 'end', 
                                            text=node_name, 
                                            image=icon,
                                            tags=("node",))
             
-            self.vfs_tree.item(item_id, values=(self._get_path_string(path_list),))
+            self.vfs_tree.item(item_id, values=(path_string,))
 
             if node_type == "dir" and "children" in node_data:
                 for child_name, child_data in node_data["children"].items():
@@ -1300,6 +1620,150 @@ class WorldBuilderArchive(tk.Tk):
         
         self.path_var.set(self._get_path_string(self.current_path))
 
+
+    def _update_tree_modified_indicator(self, path_string, is_modified):
+        """Update the modified indicator icon on a specific tree item."""
+        def find_item(parent):
+            for item in self.vfs_tree.get_children(parent):
+                values = self.vfs_tree.item(item, 'values')
+                if values and values[0] == path_string:
+                    if is_modified:
+                        self.vfs_tree.item(item, image=self.modified_icon, tags=('modified',))
+                    else:
+                        # Restore proper file icon
+                        name = path_string.split('/')[-1]
+                        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ""
+                        icon = {"table": self.table_icon, "timeline": self.timeline_icon,
+                                "image": self.image_icon, "graph": self.graph_icon}.get(ext, self.file_icon)
+                        self.vfs_tree.item(item, image=icon, tags=('node',))
+                    return
+                find_item(item)
+        find_item('')
+
+    def _update_breadcrumbs(self):
+        """Rebuild the breadcrumb path as clickable text labels, right-aligned."""
+        for w in self._breadcrumb_frame.winfo_children():
+            w.destroy()
+        # Pack from right to left so the current item is always visible
+        for i in range(len(self.current_path) - 1, -1, -1):
+            segment = self.current_path[i]
+            is_last = (i == len(self.current_path) - 1)
+            path_up_to = self.current_path[:i + 1]
+            lbl = tk.Label(self._breadcrumb_frame, text=segment,
+                          font=('Helvetica', 9, 'bold' if is_last else 'normal'),
+                          fg="#1565C0" if not is_last else "#000000",
+                          cursor="hand2" if not is_last else "")
+            lbl.pack(side=tk.RIGHT)
+            if not is_last:
+                lbl.bind('<Button-1>', lambda e, p=list(path_up_to): self._navigate_breadcrumb(p))
+                lbl.bind('<Enter>', lambda e, l=lbl: l.config(fg="#1976D2", font=('Helvetica', 9, 'underline')))
+                lbl.bind('<Leave>', lambda e, l=lbl: l.config(fg="#1565C0", font=('Helvetica', 9)))
+            if i > 0:
+                ttk.Label(self._breadcrumb_frame, text=" › ", foreground="gray",
+                         font=('Helvetica', 9)).pack(side=tk.RIGHT)
+
+    def _expand_all_folders(self):
+        """Expand all folders in the tree."""
+        def expand(parent):
+            for item in self.vfs_tree.get_children(parent):
+                self.vfs_tree.item(item, open=True)
+                expand(item)
+        expand('')
+
+    def _collapse_all_folders(self):
+        """Collapse all folders in the tree (except root)."""
+        def collapse(parent):
+            for item in self.vfs_tree.get_children(parent):
+                self.vfs_tree.item(item, open=False)
+                collapse(item)
+        collapse('')
+        # Keep root open
+        root_items = self.vfs_tree.get_children('')
+        if root_items:
+            self.vfs_tree.item(root_items[0], open=True)
+
+    def _navigate_breadcrumb(self, path_list):
+        """Navigate to a breadcrumb path segment, collapsing others."""
+        self.current_path = path_list
+        self.path_var.set(self._get_path_string(path_list))
+        self._update_breadcrumbs()
+        # Collapse all tree items first
+        def collapse_all(parent):
+            for item in self.vfs_tree.get_children(parent):
+                self.vfs_tree.item(item, open=False)
+                collapse_all(item)
+        collapse_all('')
+        # Expand only the path to the clicked folder
+        open_paths = set()
+        for i in range(1, len(path_list) + 1):
+            open_paths.add(self._get_path_string(path_list[:i]))
+        self._restore_tree_state(open_paths, path_list)
+
+    def _on_tree_hover(self, event):
+        """Show tooltip on tree item hover."""
+        item = self.vfs_tree.identify_row(event.y)
+        if item == self._tree_hover_item:
+            return
+        self._on_tree_leave(None)
+        self._tree_hover_item = item
+        if not item:
+            return
+        self._tree_hover_after = self.after(600, lambda: self._show_tree_tooltip(item, event))
+
+    def _on_tree_leave(self, event):
+        """Hide tree tooltip."""
+        if self._tree_hover_after:
+            self.after_cancel(self._tree_hover_after)
+            self._tree_hover_after = None
+        if self._tree_tooltip:
+            self._tree_tooltip.destroy()
+            self._tree_tooltip = None
+        self._tree_hover_item = None
+
+    def _show_tree_tooltip(self, item, event):
+        """Display tooltip with file info."""
+        values = self.vfs_tree.item(item, 'values')
+        if not values:
+            return
+        path_list = values[0].split('/')
+        node = self._get_file_node_reference(path_list)
+        if not node:
+            return
+
+        lines = []
+        node_type = node.get("type", "dir")
+        if node_type == "dir":
+            children = node.get("children", {})
+            lines.append(f"Folder — {len(children)} item(s)")
+        else:
+            ext = path_list[-1].rsplit('.', 1)[-1].lower() if '.' in path_list[-1] else "txt"
+            type_names = {"txt": "Text Document", "table": "Table", "timeline": "Timeline",
+                         "image": "Image Viewer", "graph": "Graph"}
+            lines.append(type_names.get(ext, "File"))
+            # Word count for text files
+            content = node.get("content", "")
+            if ext == "txt" and content:
+                try:
+                    data = json.loads(content)
+                    text = data.get("text", "") if isinstance(data, dict) else content
+                except (json.JSONDecodeError, ValueError):
+                    text = content
+                words = len(text.split())
+                lines.append(f"{words} words")
+            # Tags
+            tags = node.get("tags", [])
+            if tags:
+                lines.append(f"Tags: {', '.join(tags)}")
+
+        if not lines:
+            return
+        tip = tk.Toplevel(self)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
+        tk.Label(tip, text="\n".join(lines), background="#ffffe0", foreground="#000000",
+                 relief="solid", borderwidth=1, font=('Helvetica', 9),
+                 justify=tk.LEFT, padx=6, pady=4).pack()
+        self._tree_tooltip = tip
 
     def _on_tree_select(self, event):
         """Event handler for single-click selection in the Treeview."""
@@ -1346,6 +1810,11 @@ class WorldBuilderArchive(tk.Tk):
         """Shows a context menu on right-click with options based on node type."""
         item = self.vfs_tree.identify_row(event.y)
         if not item:
+            # Right-click on empty background
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Expand All", command=self._expand_all_folders)
+            menu.add_command(label="Collapse All", command=self._collapse_all_folders)
+            popup_menu(menu, event.x_root, event.y_root)
             return
 
         # Select the item under cursor
@@ -1368,6 +1837,10 @@ class WorldBuilderArchive(tk.Tk):
         if node.get("type") == "dir":
             menu.add_command(label="New Folder", command=lambda: self._ctx_create_folder(path_list))
             menu.add_command(label="New File", command=lambda: self._ctx_create_file(path_list))
+            if is_root:
+                menu.add_separator()
+                menu.add_command(label="Expand All", command=self._expand_all_folders)
+                menu.add_command(label="Collapse All", command=self._collapse_all_folders)
             if not is_root:
                 menu.add_separator()
                 menu.add_command(label="Rename", command=lambda: self._rename_node(path_list))
@@ -1383,6 +1856,7 @@ class WorldBuilderArchive(tk.Tk):
                 menu.add_command(label="★ Remove Bookmark", command=lambda: self._remove_bookmark(path_str))
             else:
                 menu.add_command(label="☆ Add Bookmark", command=lambda: self._add_bookmark(path_str))
+            menu.add_command(label="🏷 Tags...", command=lambda: self._edit_file_tags(path_list))
             menu.add_separator()
             menu.add_command(label="New File in Folder", command=lambda: self._ctx_create_file(path_list[:-1]))
             menu.add_separator()
@@ -1416,10 +1890,11 @@ class WorldBuilderArchive(tk.Tk):
             self._drag_item = None
 
     def _clear_drop_indicator(self):
-        """Remove the visual drop indicator spacer."""
+        """Remove the visual drop indicator."""
         if self._drop_indicator:
             try:
-                self.vfs_tree.delete(self._drop_indicator)
+                self._drop_indicator.place_forget()
+                self._drop_indicator.destroy()
             except Exception:
                 pass
         # Clear 'drop_into' highlight from all items
@@ -1445,6 +1920,13 @@ class WorldBuilderArchive(tk.Tk):
         """Show a visual insertion gap indicating drop position."""
         if not self._drag_item:
             return
+
+        # Auto-scroll when near edges
+        tree_height = self.vfs_tree.winfo_height()
+        if event.y < 30:
+            self.vfs_tree.yview_scroll(-1, "units")
+        elif event.y > tree_height - 30:
+            self.vfs_tree.yview_scroll(1, "units")
         
         target = self.vfs_tree.identify_row(event.y)
         
@@ -1481,20 +1963,19 @@ class WorldBuilderArchive(tk.Tk):
         tgt_node = self._get_file_node_reference(tgt_path)
         is_dir = tgt_node and tgt_node.get("type") == "dir"
 
-        # Determine drop zone: top 25% = before, bottom 25% = after, middle 50% on folders = into
-        if rel_y < h * 0.25:
-            position = 'before'
-            line_y = y
-        elif rel_y > h * 0.75:
-            position = 'after'
-            line_y = y + h
-        elif is_dir:
-            position = 'into'
-            line_y = None
+        # Folders get a larger "into" zone; closed folders always = into
+        if is_dir:
+            if rel_y < h * 0.25:
+                position = 'before'
+            elif rel_y > h * 0.75:
+                position = 'after'
+            else:
+                position = 'into'
         else:
-            # For files, middle zone counts as 'after'
-            position = 'after'
-            line_y = y + h
+            if rel_y < h * 0.5:
+                position = 'before'
+            else:
+                position = 'after'
 
         self._drop_target_info = (target, position)
 
@@ -1502,15 +1983,14 @@ class WorldBuilderArchive(tk.Tk):
         if position == 'into':
             self.vfs_tree.tag_configure('drop_into', background='#BBDEFB')
             self.vfs_tree.item(target, tags=('drop_into',))
-            self._drop_indicator = None  # No spacer for 'into'
+            self._drop_indicator = None
         else:
-            parent_id = self.vfs_tree.parent(target)
-            target_index = self.vfs_tree.index(target)
-            insert_index = target_index if position == 'before' else target_index + 1
-            self._drop_indicator = self.vfs_tree.insert(parent_id, insert_index,
-                                                        text='━━━━━━━━━━━━━━━━━━━━',
-                                                        tags=('spacer',))
-            self.vfs_tree.tag_configure('spacer', foreground='#1976D2', background='#E3F2FD')
+            bbox = self.vfs_tree.bbox(target)
+            if bbox:
+                x, y, w, h = bbox
+                line_y = y if position == 'before' else y + h
+                self._drop_indicator = tk.Frame(self.vfs_tree, bg='#1976D2', height=3)
+                self._drop_indicator.place(x=x, y=line_y - 1, width=w)
 
     def _on_drag_drop(self, event):
         """Handle drop based on the indicator position."""
@@ -1550,14 +2030,18 @@ class WorldBuilderArchive(tk.Tk):
         tgt_node = self._get_file_node_reference(tgt_path)
         is_dir = tgt_node and tgt_node.get("type") == "dir"
 
-        if rel_y < h * 0.25:
-            position = 'before'
-        elif rel_y > h * 0.75:
-            position = 'after'
-        elif is_dir:
-            position = 'into'
+        if is_dir:
+            if rel_y < h * 0.25:
+                position = 'before'
+            elif rel_y > h * 0.75:
+                position = 'after'
+            else:
+                position = 'into'
         else:
-            position = 'after'
+            if rel_y < h * 0.5:
+                position = 'before'
+            else:
+                position = 'after'
 
         src_parent = src_path[:-1]
         tgt_parent = tgt_path[:-1]
@@ -1738,6 +2222,8 @@ class WorldBuilderArchive(tk.Tk):
     def _toggle_vfs_panel(self):
         """Show or hide the VFS left panel."""
         if self._vfs_panel_visible:
+            # Save current width before hiding
+            self._save_vfs_width()
             self.main_pane.forget(self.left_frame)
             self._vfs_toggle_btn.config(text="▶")
             self._vfs_panel_visible = False
@@ -1745,18 +2231,170 @@ class WorldBuilderArchive(tk.Tk):
             self.main_pane.insert(0, self.left_frame, weight=10)
             self._vfs_toggle_btn.config(text="◀")
             self._vfs_panel_visible = True
+            # Restore saved width
+            config = self._load_config()
+            vfs_ratio = config.get("vfs_panel_ratio")
+            if vfs_ratio:
+                self.after(50, lambda: self.main_pane.sashpos(0, int(vfs_ratio * self.main_pane.winfo_width())))
+
+    def _save_vfs_width(self):
+        """Save current VFS panel width ratio to config."""
+        try:
+            width = self.main_pane.sashpos(0)
+            total = self.main_pane.winfo_width()
+            if width > 0 and total > 0:
+                config = self._load_config()
+                config["vfs_panel_ratio"] = width / total
+                with open(self.CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+        except Exception:
+            pass
 
     def _clear_right_panel(self):
         """Removes the active editor widget from the editor area."""
         for widget in self._editor_area.winfo_children():
             widget.destroy()
         self.active_editor = None
+        # Show recent files if no tabs are open
+        if not self._open_tabs:
+            self._show_recent_files()
+
+    def _track_recent_file(self, path_string):
+        """Add a file to the recent files list (stored in VFS root)."""
+        root = self.vfs.get(self.root_name)
+        if not root:
+            return
+        recent = root.get("recent_files", [])
+        if path_string in recent:
+            recent.remove(path_string)
+        recent.insert(0, path_string)
+        root["recent_files"] = recent[:10]
+
+    def _show_recent_files(self):
+        """Show clickable recent files in the empty editor area."""
+        root = self.vfs.get(self.root_name)
+        recent = root.get("recent_files", []) if root else []
+        if not recent:
+            return
+        frame = ttk.Frame(self._editor_area, padding="30")
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Recent Files", font=('Helvetica', 14, 'bold')).pack(anchor='w', pady=(0, 15))
+        for path_str in recent:
+            # Check file still exists in VFS
+            path_list = path_str.split('/')
+            node = self._get_file_node_reference(path_list)
+            if node and node.get("type") == "file":
+                name = path_list[-1]
+                folder = "/".join(path_list[1:-1]) if len(path_list) > 2 else ""
+                display = f"{name}  ({folder})" if folder else name
+                btn = ttk.Button(frame, text=display,
+                               command=lambda p=list(path_list): self._open_file_editor(p))
+                btn.pack(anchor='w', pady=2)
+
+    def _build_backlinks_index(self):
+        """Traverse VFS and build {target_path: [(source_path, context)]} reverse map."""
+        index = {}
+        def scan_node(node, path_list):
+            if node.get("type") != "file":
+                if node.get("type") == "dir":
+                    for name, child in node.get("children", {}).items():
+                        scan_node(child, path_list + [name])
+                return
+            source_path = self._get_path_string(path_list)
+            content = node.get("content", "")
+            if not content:
+                return
+            # Find all [[path|display]] links
+            for m in LINK_REGEX.finditer(content):
+                target = m.group(1)
+                if target not in index:
+                    index[target] = []
+                index[target].append(source_path)
+            # Also check JSON content (text editor, timeline, image, graph)
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    self._scan_json_links(data, source_path, index)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        root = self.vfs.get(self.root_name)
+        if root:
+            scan_node(root, [self.root_name])
+        return index
+
+    def _scan_json_links(self, data, source_path, index):
+        """Extract link targets from JSON structures (text tags, timeline events, image markers, graph nodes)."""
+        # Text editor: tags with "link" type
+        for tag in data.get("tags", []):
+            if tag.get("tag") == "link" and tag.get("path"):
+                index.setdefault(tag["path"], []).append(source_path)
+        # Image markers and labels
+        for marker in data.get("markers", []):
+            if marker.get("link"):
+                index.setdefault(marker["link"], []).append(source_path)
+        for label in data.get("labels", []):
+            if label.get("link"):
+                index.setdefault(label["link"], []).append(source_path)
+        # Graph nodes
+        for node in data.get("nodes", []):
+            if node.get("link"):
+                index.setdefault(node["link"], []).append(source_path)
+        # Timeline events (recursive for sub_events)
+        def scan_events(events):
+            for evt in events:
+                for field in ("name", "description"):
+                    text = evt.get(field, "")
+                    for m in LINK_REGEX.finditer(text):
+                        index.setdefault(m.group(1), []).append(source_path)
+                scan_events(evt.get("sub_events", []))
+        scan_events(data.get("events", []))
+        # Recurring events
+        for rec in data.get("recurring_events", []):
+            desc = rec.get("description", "")
+            for m in LINK_REGEX.finditer(desc):
+                index.setdefault(m.group(1), []).append(source_path)
+
+    def _update_backlinks_panel(self):
+        """Refresh the backlinks panel for the current active file."""
+        for w in self._backlinks_list.winfo_children():
+            w.destroy()
+        if not self.active_file_path or not self._backlinks_visible:
+            return
+        target = self._get_path_string(self.active_file_path)
+        index = self._build_backlinks_index()
+        sources = list(set(index.get(target, [])))
+        sources = [s for s in sources if s != target]
+        if not sources:
+            ttk.Label(self._backlinks_list, text="Nothing links here", foreground="gray").pack(anchor='w', pady=2)
+            return
+        for src in sources:
+            name = src.split('/')[-1]
+            btn = ttk.Button(self._backlinks_list, text=f"← {name}",
+                           command=lambda p=src: self._backlink_navigate(p))
+            btn.pack(fill=tk.X, pady=1)
+
+    def _backlink_navigate(self, path_string):
+        """Navigate to a backlink and collapse the panel."""
+        self._toggle_backlinks()
+        self._open_file_editor(path_string.split('/'))
+
+    def _toggle_backlinks(self):
+        """Show or hide the backlinks side panel."""
+        if self._backlinks_visible:
+            self.main_pane.forget(self._backlinks_frame)
+            self._backlinks_visible = False
+        else:
+            self.main_pane.add(self._backlinks_frame, weight=8)
+            self._backlinks_visible = True
+            self._update_backlinks_panel()
+        self._update_bookmark_button()
 
     def _open_file_editor(self, path_list):
         """Initializes the correct editor widget (Text, CSV, or Timeline) for the new file."""
         
         file_name = path_list[-1]
         path_string = self._get_path_string(path_list)
+        self._track_recent_file(path_string)
 
         # If file is in a pop-out window, focus that window instead
         if path_string in self._popped_out_files:
@@ -1788,6 +2426,10 @@ class WorldBuilderArchive(tk.Tk):
         for tab_path in self._open_tabs:
             path_string = self._get_path_string(tab_path)
             file_name = tab_path[-1]
+            # Modified indicator dot
+            if path_string in self._modified_files:
+                dot = tk.Label(self._tab_bar, text="●", fg="#FF5722", font=('Helvetica', 10))
+                dot.pack(side=tk.LEFT, padx=(3, 0))
             btn = ttk.Button(self._tab_bar, text=file_name,
                            command=lambda p=list(tab_path): self._switch_to_tab(p))
             btn.pack(side=tk.LEFT, padx=1)
@@ -1796,6 +2438,9 @@ class WorldBuilderArchive(tk.Tk):
             btn.bind('<B1-Motion>', self._tab_drag_motion)
             btn.bind('<ButtonRelease-1>', self._tab_drag_drop)
             self._tab_buttons[path_string] = btn
+
+        # Always show bookmark + backlinks buttons
+        self._update_bookmark_button()
 
     def _tab_drag_start(self, event, path_string):
         """Start tab drag."""
@@ -1961,11 +2606,12 @@ class WorldBuilderArchive(tk.Tk):
         if self.active_file_path:
             active_str = self._get_path_string(self.active_file_path)
             for ps, btn in self._tab_buttons.items():
-                btn.state(['pressed'] if ps == active_str else ['!pressed'])
+                btn.configure(style="ActiveTab.TButton" if ps == active_str else "InactiveTab.TButton")
 
     def _switch_to_tab(self, path_list):
         """Switch the editor area to show the given file."""
         self._save_editor_content_to_vfs()
+        self._rebuild_tab_bar()
         self._clear_right_panel()
 
         content = self._get_file_content(path_list)
@@ -1991,11 +2637,12 @@ class WorldBuilderArchive(tk.Tk):
         # Highlight active tab
         for ps, btn in self._tab_buttons.items():
             if ps == self._get_path_string(path_list):
-                btn.state(['pressed'])
+                btn.configure(style="ActiveTab.TButton")
             else:
-                btn.state(['!pressed'])
+                btn.configure(style="InactiveTab.TButton")
 
         self._update_bookmark_button()
+        self._update_backlinks_panel()
 
     def _tab_right_click(self, event, path_list):
         """Right-click menu on a tab."""
@@ -2018,9 +2665,44 @@ class WorldBuilderArchive(tk.Tk):
         win.title(f"Storyboard - {file_name}")
         win.geometry("800x600")
 
+        # Toggle button toolbar (top)
+        toolbar = ttk.Frame(win)
+        toolbar.pack(fill=tk.X, padx=5, pady=(5, 2))
+        bl_visible = [False]
+        def toggle_bl():
+            if bl_visible[0]:
+                pane.forget(backlinks_panel)
+                bl_btn.config(text="◀")
+                bl_visible[0] = False
+            else:
+                pane.add(backlinks_panel, weight=15)
+                bl_btn.config(text="▶")
+                bl_visible[0] = True
+        bl_btn = ttk.Button(toolbar, text="◀", width=3, command=toggle_bl)
+        bl_btn.pack(side=tk.RIGHT)
 
-        editor_frame = ttk.Frame(win, padding="5")
-        editor_frame.pack(fill=tk.BOTH, expand=True)
+        # Main pane with editor + collapsible backlinks panel
+        pane = ttk.PanedWindow(win, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        editor_frame = ttk.Frame(pane, padding="5")
+        pane.add(editor_frame, weight=70)
+
+        # Backlinks panel (right side, starts hidden)
+        backlinks_panel = ttk.Frame(pane, padding="5")
+        ttk.Label(backlinks_panel, text="What links here", font=('Helvetica', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        bl_list = ttk.Frame(backlinks_panel)
+        bl_list.pack(fill=tk.BOTH, expand=True)
+        index = self._build_backlinks_index()
+        sources = list(set(index.get(path_string, [])))
+        sources = [s for s in sources if s != path_string]
+        if sources:
+            for src in sources:
+                name = src.split('/')[-1]
+                ttk.Button(bl_list, text=f"← {name}",
+                          command=lambda p=src: self._open_file_editor(p.split('/'))).pack(fill=tk.X, pady=1)
+        else:
+            ttk.Label(bl_list, text="Nothing links here", foreground="gray").pack(anchor='w')
 
         if file_name.lower().endswith('.table'):
             editor = CSVGrid(editor_frame, content, name_regex=self.NAME_REGEX, controller=self)
@@ -2050,14 +2732,59 @@ class WorldBuilderArchive(tk.Tk):
         win.protocol("WM_DELETE_WINDOW", on_close)
 
         # Close the tab in the main window
-        self._close_tab(path_list)
+        self._close_tab(path_list, skip_prompt=True)
 
-    def _close_tab(self, path_list):
+    def _close_tab(self, path_list, skip_prompt=False):
         """Close a tab and switch to an adjacent one."""
         path_string = self._get_path_string(path_list)
 
+        # Check for unsaved changes
+        if not skip_prompt and path_string in self._modified_files:
+            # Custom dialog with Keep/Discard/Cancel
+            dlg = tk.Toplevel(self)
+            dlg.transient(self)
+            dlg.grab_set()
+            dlg.title("Unsaved Changes")
+            dlg.geometry("320x100")
+            dlg.resizable(False, False)
+            ttk.Label(dlg, text=f"'{path_list[-1]}' has unsaved edits.\nKeep changes or discard?",
+                     font=('Helvetica', 9)).pack(padx=15, pady=(15, 10))
+            result = [None]
+            bf = ttk.Frame(dlg); bf.pack(pady=(0, 10))
+            ttk.Button(bf, text="Keep", command=lambda: (result.__setitem__(0, True), dlg.destroy())).pack(side=tk.LEFT, padx=5)
+            ttk.Button(bf, text="Discard", command=lambda: (result.__setitem__(0, False), dlg.destroy())).pack(side=tk.LEFT, padx=5)
+            ttk.Button(bf, text="Cancel", command=lambda: dlg.destroy()).pack(side=tk.LEFT, padx=5)
+            dlg.bind('<Escape>', lambda e: dlg.destroy())
+            dlg.wait_window()
+            if result[0] is None:  # Cancel
+                return
+            if result[0]:  # Keep
+                if self.active_file_path and self._get_path_string(self.active_file_path) == path_string:
+                    self._save_editor_content_to_vfs()
+            else:  # Discard — revert VFS content from disk
+                # Clear active editor so it doesn't re-save on tab switch
+                if self.active_file_path and self._get_path_string(self.active_file_path) == path_string:
+                    self.active_editor = None
+                if self.file_path:
+                    try:
+                        with open(self.file_path, 'r') as f:
+                            saved_data = json.load(f)
+                        # Walk the saved data to find this file's original content
+                        parts = path_list[1:]  # skip root name
+                        node_saved = saved_data
+                        for part in parts:
+                            node_saved = node_saved.get("children", {}).get(part, {})
+                        if node_saved.get("type") == "file":
+                            node = self._get_file_node_reference(path_list)
+                            if node:
+                                node["content"] = node_saved.get("content", "")
+                    except Exception:
+                        pass
+                self._modified_files.discard(path_string)
+                self._update_tree_modified_indicator(path_string, False)
+
         # Save content if this is the active tab
-        if self.active_file_path and self._get_path_string(self.active_file_path) == path_string:
+        elif self.active_file_path and self._get_path_string(self.active_file_path) == path_string:
             self._save_editor_content_to_vfs()
 
         # Remove from open tabs
@@ -2072,15 +2799,52 @@ class WorldBuilderArchive(tk.Tk):
             self._clear_right_panel()
             self.active_file_path = None
             self._update_bookmark_button()
+            self._update_backlinks_panel()
 
     def _close_other_tabs(self, keep_path_list):
         """Close all tabs except the specified one."""
-        self._save_editor_content_to_vfs()
         keep_string = self._get_path_string(keep_path_list)
-        self._open_tabs = [t for t in self._open_tabs if self._get_path_string(t) == keep_string]
-        self._rebuild_tab_bar()
-        self._switch_to_tab(keep_path_list)
+        tabs_to_close = [t for t in self._open_tabs if self._get_path_string(t) != keep_string]
+        for tab in tabs_to_close:
+            self._close_tab(tab)
 
+
+    def _start_mod_monitor(self):
+        """Periodically check if active editor has unsaved changes."""
+        def check():
+            if self.active_editor and self.active_file_path:
+                if hasattr(self.active_editor, 'winfo_exists') and self.active_editor.winfo_exists():
+                    try:
+                        current = self.active_editor.get_content()
+                        stored = self._get_file_content(self.active_file_path)
+                        ps = self._get_path_string(self.active_file_path)
+                        if current != stored:
+                            if ps not in self._modified_files:
+                                self._modified_files.add(ps)
+                                self._rebuild_tab_bar()
+                                self._update_tree_modified_indicator(ps, True)
+                        else:
+                            # Only clear if VFS overall is not modified (matches disk)
+                            if ps in self._modified_files and not self._is_vfs_modified():
+                                self._modified_files.discard(ps)
+                                self._rebuild_tab_bar()
+                                self._update_tree_modified_indicator(ps, False)
+                                self._rebuild_tab_bar()
+                    except Exception:
+                        pass
+            # Blink modified dots
+            self._blink_state = not self._blink_state
+            color = "#FF5722" if self._blink_state else "#882200"
+            for widget in self._tab_bar.winfo_children():
+                if isinstance(widget, tk.Label) and widget.cget("text") == "●":
+                    widget.config(fg=color)
+            # Blink tree modified icons
+            mod_icon = self.modified_icon if self._blink_state else self.modified_icon_dim
+            for item in self._get_all_tree_items():
+                if 'modified' in self.vfs_tree.item(item, 'tags'):
+                    self.vfs_tree.item(item, image=mod_icon)
+            self._mod_check_after = self.after(800, check)
+        self._mod_check_after = self.after(800, check)
 
     def _save_editor_content_to_vfs(self):
         """
@@ -2094,6 +2858,12 @@ class WorldBuilderArchive(tk.Tk):
             return
 
         new_content = self.active_editor.get_content()
+        old_content = self._get_file_content(self.active_file_path)
+        if new_content != old_content:
+            ps = self._get_path_string(self.active_file_path)
+            if ps not in self._modified_files:
+                self._modified_files.add(ps)
+                self._update_tree_modified_indicator(ps, True)
         self._set_file_content(self.active_file_path, new_content)
 
 
@@ -2174,6 +2944,431 @@ class NewFileCreationDialog(tk.Toplevel):
         self.destroy()
 
 
+class GlobalFindReplaceDialog(tk.Toplevel):
+    """Global find and replace across all files in the VFS."""
+    def __init__(self, controller):
+        super().__init__(controller)
+        self.transient(controller)
+        self.title("Find & Replace in All Files")
+        self.controller = controller
+        self.geometry("600x450")
+
+        # Search controls
+        top = ttk.Frame(self, padding="10")
+        top.pack(fill=tk.X)
+
+        ttk.Label(top, text="Find:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self.find_var = tk.StringVar()
+        find_entry = ttk.Entry(top, textvariable=self.find_var, width=40)
+        find_entry.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        find_entry.bind('<Return>', lambda e: self._do_search())
+        ttk.Button(top, text="Find All", command=self._do_search).grid(row=0, column=2, padx=2)
+
+        ttk.Label(top, text="Replace:").grid(row=1, column=0, sticky="w", padx=(0, 5), pady=(5, 0))
+        self.replace_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.replace_var, width=40).grid(row=1, column=1, sticky="ew", padx=(0, 5), pady=(5, 0))
+        self._replace_scope_var = tk.StringVar(value="Individual Result")
+        ttk.OptionMenu(top, self._replace_scope_var, "Individual Result",
+                      "Individual Result", "Entire File", "Entire Project").grid(row=1, column=2, padx=2, pady=(5, 0))
+        ttk.Button(top, text="Replace", command=self._do_replace).grid(row=1, column=3, padx=2, pady=(5, 0))
+
+        self.case_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Case sensitive", variable=self.case_var).grid(row=2, column=1, sticky="w", pady=(5, 0))
+        self.whole_word_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Whole word", variable=self.whole_word_var).grid(row=2, column=2, sticky="w", pady=(5, 0))
+
+        top.columnconfigure(1, weight=1)
+
+        # Results
+        self._status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self._status_var).pack(fill=tk.X, padx=10)
+
+        results_frame = ttk.Frame(self)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        self.results_tree = ttk.Treeview(results_frame, columns=('context',), show='tree headings')
+        self.results_tree.heading('#0', text='File')
+        self.results_tree.heading('context', text='Match')
+        self.results_tree.column('#0', width=200)
+        self.results_tree.column('context', width=350)
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_tree.yview)
+        self.results_tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.results_tree.bind('<Double-1>', self._on_result_click)
+        self.results_tree.bind('<ButtonRelease-3>', self._on_result_right_click)
+
+        self.bind('<Escape>', lambda e: self.destroy())
+        find_entry.focus_set()
+
+    def _get_text_content(self, content):
+        """Extract searchable plain text from file content."""
+        if not content:
+            return ""
+        # Try JSON (text editor, timeline, image, graph)
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                parts = []
+                # Text editor
+                if "text" in data and "tags" in data:
+                    parts.append(data["text"])
+                # Timeline
+                for evt in data.get("events", []):
+                    self._collect_event_text(evt, parts)
+                for rec in data.get("recurring_events", []):
+                    parts.append(rec.get("name", ""))
+                    parts.append(rec.get("description", ""))
+                # Image
+                for m in data.get("markers", []):
+                    parts.append(m.get("label", ""))
+                    parts.append(m.get("note", ""))
+                for lb in data.get("labels", []):
+                    parts.append(lb.get("text", ""))
+                # Graph
+                for n in data.get("nodes", []):
+                    parts.append(n.get("label", ""))
+                    parts.append(n.get("description", ""))
+                for e in data.get("edges", []):
+                    parts.append(e.get("label", ""))
+                    parts.append(e.get("description", ""))
+                if parts:
+                    return "\n".join(p for p in parts if p)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return content  # CSV/plain text
+
+    def _collect_event_text(self, evt, parts):
+        parts.append(evt.get("name", ""))
+        parts.append(evt.get("description", ""))
+        for sub in evt.get("sub_events", []):
+            self._collect_event_text(sub, parts)
+
+    def _do_search(self):
+        """Search all files for the query."""
+        query = self.find_var.get()
+        if not query:
+            return
+        self.results_tree.delete(*self.results_tree.get_children())
+        case_sensitive = self.case_var.get()
+        whole_word = self.whole_word_var.get()
+
+        import re
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if whole_word:
+            search_pattern = re.compile(r'\b' + re.escape(query) + r'\b', flags)
+        else:
+            search_pattern = re.compile(re.escape(query), flags)
+
+        count = 0
+        def search_node(node, path_list):
+            nonlocal count
+            if node.get("type") == "file":
+                content = node.get("content", "")
+                text = self._get_text_content(content)
+                all_matches = list(search_pattern.finditer(text))
+                if all_matches:
+                    path_str = "/".join(path_list)
+                    name = path_list[-1]
+                    occ = len(all_matches)
+                    count += occ
+                    # Parent row for the file
+                    file_item = self.results_tree.insert('', 'end', text=f"{name} ({occ})",
+                                                       values=("",), tags=(path_str,))
+                    # Child row for each match
+                    for m in all_matches:
+                        idx = m.start()
+                        start = max(0, idx - 20)
+                        end = min(len(text), idx + len(query) + 30)
+                        ctx = text[start:end].replace('\n', ' ').strip()
+                        if start > 0:
+                            ctx = "..." + ctx
+                        if end < len(text):
+                            ctx += "..."
+                        self.results_tree.insert(file_item, 'end', text="",
+                                               values=(ctx,), tags=(path_str, str(idx)))
+                    self.results_tree.item(file_item, open=True)
+            elif node.get("type") == "dir":
+                for child_name, child in node.get("children", {}).items():
+                    search_node(child, path_list + [child_name])
+
+        root = self.controller.vfs.get(self.controller.root_name)
+        if root:
+            search_node(root, [self.controller.root_name])
+
+        self._status_var.set(f"{count} match{'es' if count != 1 else ''} in {len(self.results_tree.get_children())} file(s)")
+
+    def _do_replace_all(self):
+        """Replace all occurrences across all files."""
+        query = self.find_var.get()
+        replacement = self.replace_var.get()
+        if not query:
+            return
+        case_sensitive = self.case_var.get()
+
+        count = 0
+        def replace_in_node(node, path_list):
+            nonlocal count
+            if node.get("type") == "file":
+                content = node.get("content", "")
+                if not content:
+                    return
+                import re
+                flags = 0 if case_sensitive else re.IGNORECASE
+                escaped = re.escape(query)
+                pat_str = r'\b' + escaped + r'\b' if self.whole_word_var.get() else escaped
+                pattern = re.compile(pat_str, flags)
+                matches = pattern.findall(content)
+                if matches:
+                    occ, new_content = self._replace_content_aware(content, pattern, replacement)
+                    count += occ
+                    node["content"] = new_content
+            elif node.get("type") == "dir":
+                for child in node.get("children", {}).values():
+                    replace_in_node(child, path_list + [""])
+
+        if not messagebox.askyesno("Replace All",
+            f"Replace all occurrences of '{query}' with '{replacement}' across all files?",
+            parent=self):
+            return
+
+        root = self.controller.vfs.get(self.controller.root_name)
+        if root:
+            replace_in_node(root, [])
+
+        self._status_var.set(f"Replaced {count} occurrence{'s' if count != 1 else ''}")
+        # Refresh current editor if open
+        if self.controller.active_file_path:
+            self.controller._refresh_active_editor()
+            self.controller._modified_files.add(
+                self.controller._get_path_string(self.controller.active_file_path))
+            self.controller._update_tree_modified_indicator(
+                self.controller._get_path_string(self.controller.active_file_path), True)
+            self.controller._rebuild_tab_bar()
+        self._do_search()  # Re-run search to show remaining
+
+    def _replace_content_aware(self, content, pattern, replacement):
+        """Replace in content, adjusting tag offsets for text editor JSON format."""
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict) and "text" in data and "tags" in data:
+                # Text editor format — replace in text and adjust tag offsets
+                text = data["text"]
+                tags = data["tags"]
+                # Find all matches in text (process from end to preserve earlier offsets)
+                matches = list(pattern.finditer(text))
+                count = len(matches)
+                for m in reversed(matches):
+                    old_len = m.end() - m.start()
+                    new_len = len(replacement)
+                    diff = new_len - old_len
+                    # Replace in text
+                    text = text[:m.start()] + replacement + text[m.end():]
+                    # Shift tag offsets
+                    for tag in tags:
+                        if tag["start"] >= m.end():
+                            tag["start"] += diff
+                            tag["end"] += diff
+                        elif tag["start"] > m.start():
+                            tag["start"] = m.start()
+                            tag["end"] = max(tag["end"] + diff, tag["start"])
+                        elif tag["end"] > m.start():
+                            tag["end"] += diff
+                data["text"] = text
+                return count, json.dumps(data)
+        except (json.JSONDecodeError, ValueError, KeyError):
+            pass
+        # Non-text-editor content: raw replace
+        count = len(pattern.findall(content))
+        return count, pattern.sub(replacement, content)
+
+    def _replace_content_aware_nth(self, content, pattern, replacement, n):
+        """Replace only the Nth occurrence, adjusting tag offsets for text editor format."""
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict) and "text" in data and "tags" in data:
+                text = data["text"]
+                tags = data["tags"]
+                matches = list(pattern.finditer(text))
+                if n < len(matches):
+                    m = matches[n]
+                    old_len = m.end() - m.start()
+                    new_len = len(replacement)
+                    diff = new_len - old_len
+                    text = text[:m.start()] + replacement + text[m.end():]
+                    for tag in tags:
+                        if tag["start"] >= m.end():
+                            tag["start"] += diff
+                            tag["end"] += diff
+                        elif tag["start"] > m.start():
+                            tag["start"] = m.start()
+                            tag["end"] = max(tag["end"] + diff, tag["start"])
+                        elif tag["end"] > m.start():
+                            tag["end"] += diff
+                    data["text"] = text
+                    return json.dumps(data)
+                return content
+        except (json.JSONDecodeError, ValueError, KeyError):
+            pass
+        # Non-text-editor: replace Nth in raw content
+        count = 0
+        def replace_nth(m):
+            nonlocal count
+            if count == n:
+                count += 1
+                return replacement
+            count += 1
+            return m.group(0)
+        return pattern.sub(replace_nth, content)
+
+    def _on_result_click(self, event):
+        """Navigate to the clicked result file."""
+        sel = self.results_tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        tags = self.results_tree.item(item, 'tags')
+        if tags:
+            path_str = tags[0]
+            self.controller._open_file_editor(path_str.split('/'))
+
+    def _on_result_right_click(self, event):
+        """Right-click menu on a search result."""
+        item = self.results_tree.identify_row(event.y)
+        if not item:
+            return
+        self.results_tree.selection_set(item)
+        tags = self.results_tree.item(item, 'tags')
+        if not tags:
+            return
+        path_str = tags[0]
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Open File", command=lambda: self.controller._open_file_editor(path_str.split('/')))
+        menu.add_separator()
+        if len(tags) > 1:
+            # Child row — single instance
+            match_idx = int(tags[1])
+            menu.add_command(label="Replace This Instance", command=lambda: self._replace_single_instance(path_str, match_idx))
+        menu.add_command(label="Replace in This File", command=lambda: self._replace_in_specific_file(path_str))
+        popup_menu(menu, event.x_root, event.y_root)
+
+    def _do_replace(self):
+        """Replace based on selected scope."""
+        scope = self._replace_scope_var.get()
+        if scope == "Entire Project":
+            self._do_replace_all()
+        elif scope == "Entire File":
+            self._do_replace_in_file()
+        elif scope == "Individual Result":
+            self._do_replace_individual()
+
+    def _do_replace_individual(self):
+        """Replace the currently selected individual result."""
+        sel = self.results_tree.selection()
+        if not sel:
+            messagebox.showinfo("Select Result", "Select a specific match in the results.", parent=self)
+            return
+        tags = self.results_tree.item(sel[0], 'tags')
+        if not tags or len(tags) < 2:
+            messagebox.showinfo("Select Result", "Select a specific match (not a file header).", parent=self)
+            return
+        path_str = tags[0]
+        match_idx = int(tags[1])
+        self._replace_single_instance(path_str, match_idx)
+
+    def _do_replace_in_file(self):
+        """Replace in the currently selected result file."""
+        sel = self.results_tree.selection()
+        if not sel:
+            messagebox.showinfo("Select File", "Select a file in the results first.", parent=self)
+            return
+        tags = self.results_tree.item(sel[0], 'tags')
+        if tags:
+            self._replace_in_specific_file(tags[0])
+
+    def _replace_in_specific_file(self, path_str):
+        """Replace all occurrences in a specific file."""
+        query = self.find_var.get()
+        replacement = self.replace_var.get()
+        if not query:
+            return
+        if not messagebox.askyesno("Replace in File",
+            f"Replace all '{query}' with '{replacement}' in {path_str.split('/')[-1]}?", parent=self):
+            return
+        path_list = path_str.split('/')
+        node = self.controller._get_file_node_reference(path_list)
+        if not node or node.get("type") != "file":
+            return
+        content = node.get("content", "")
+        case_sensitive = self.case_var.get()
+        import re
+        flags = 0 if case_sensitive else re.IGNORECASE
+        escaped = re.escape(query)
+        pat_str = r'\b' + escaped + r'\b' if self.whole_word_var.get() else escaped
+        pattern = re.compile(pat_str, flags)
+        count, new_content = self._replace_content_aware(content, pattern, replacement)
+        node["content"] = new_content
+        self._status_var.set(f"Replaced {count} occurrence{'s' if count != 1 else ''} in {path_list[-1]}")
+        # Refresh editor if this file is currently open
+        if (self.controller.active_file_path and
+            self.controller._get_path_string(self.controller.active_file_path) == path_str):
+            self.controller._refresh_active_editor()
+        # Mark file as modified
+        self.controller._modified_files.add(path_str)
+        self.controller._update_tree_modified_indicator(path_str, True)
+        self.controller._rebuild_tab_bar()
+        self._do_search()
+
+    def _replace_single_instance(self, path_str, match_idx):
+        """Replace a single occurrence at a specific position in a file."""
+        query = self.find_var.get()
+        replacement = self.replace_var.get()
+        if not query:
+            return
+        if not messagebox.askyesno("Replace", f"Replace this instance of '{query}' with '{replacement}'?", parent=self):
+            return
+        path_list = path_str.split('/')
+        node = self.controller._get_file_node_reference(path_list)
+        if not node or node.get("type") != "file":
+            return
+        content = node.get("content", "")
+        # match_idx is the position in extracted text; find the corresponding
+        # occurrence number and replace that Nth match in raw content
+        import re
+        case_sensitive = self.case_var.get()
+        flags = 0 if case_sensitive else re.IGNORECASE
+        escaped = re.escape(query)
+        pat_str = r'\b' + escaped + r'\b' if self.whole_word_var.get() else escaped
+        pattern = re.compile(pat_str, flags)
+
+        # Find which occurrence number this is in extracted text
+        text = self._get_text_content(content)
+        occ_num = 0
+        for m in pattern.finditer(text):
+            if m.start() == match_idx:
+                break
+            occ_num += 1
+
+        # Now replace the Nth occurrence with offset-aware logic
+        new_content = self._replace_content_aware_nth(content, pattern, replacement, occ_num)
+        if new_content != content:
+            node["content"] = new_content
+            self._status_var.set(f"Replaced 1 instance in {path_list[-1]}")
+        else:
+            self._status_var.set("No replacement made")
+
+        if (self.controller.active_file_path and
+            self.controller._get_path_string(self.controller.active_file_path) == path_str):
+            self.controller._refresh_active_editor()
+            self.controller._modified_files.add(
+                self.controller._get_path_string(self.controller.active_file_path))
+            self.controller._update_tree_modified_indicator(
+                self.controller._get_path_string(self.controller.active_file_path), True)
+            self.controller._rebuild_tab_bar()
+        self._do_search()
+
+
 class SettingsDialog(tk.Toplevel):
     """Settings dialog for application configuration."""
     def __init__(self, parent):
@@ -2182,7 +3377,7 @@ class SettingsDialog(tk.Toplevel):
         self.grab_set()
         self.title("Settings")
         self.parent = parent
-        self.geometry("400x300")
+        self.geometry("400x380")
         
         config = parent._load_config()
         
@@ -2194,17 +3389,12 @@ class SettingsDialog(tk.Toplevel):
         
         # Reopen last file on startup
         self.reopen_var = tk.StringVar(value=config.get("reopen_behavior", "ask"))
-        reopen_frame = ttk.LabelFrame(container, text="On Startup", padding="10")
+        reopen_frame = ttk.Frame(container)
         reopen_frame.pack(fill=tk.X, pady=5)
-        
-        self._reopen_buttons = {}
-        for value, label in [("always", "Always Reopen"), ("ask", "Ask to Reopen"), ("never", "Start Fresh")]:
-            btn = ttk.Button(reopen_frame, text=label, 
-                           command=lambda v=value: self._select_reopen(v))
-            btn.pack(side=tk.LEFT, padx=5, pady=2)
-            self._reopen_buttons[value] = btn
-        
-        self._update_reopen_buttons()
+        ttk.Label(reopen_frame, text="Reopen latest project:").pack(side=tk.LEFT)
+        self.reopen_var.trace_add('write', lambda *a: self._auto_save())
+        ttk.OptionMenu(reopen_frame, self.reopen_var, self.reopen_var.get(),
+                      "always", "ask", "never").pack(side=tk.LEFT, padx=10)
         
         # Window size
         size_frame = ttk.Frame(container)
@@ -2226,6 +3416,18 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(container, text="Auto-collapse file panel when opening a file",
                        variable=self.auto_collapse_var, command=self._auto_save).pack(anchor='w', pady=5)
         
+        # Auto-save
+        autosave_frame = ttk.Frame(container)
+        autosave_frame.pack(fill=tk.X, pady=5)
+        self.autosave_var = tk.BooleanVar(value=config.get("auto_save_enabled", False))
+        ttk.Checkbutton(autosave_frame, text="Auto-save every",
+                       variable=self.autosave_var, command=self._auto_save).pack(side=tk.LEFT)
+        self.autosave_interval_var = tk.IntVar(value=config.get("auto_save_interval", 60))
+        ttk.Spinbox(autosave_frame, from_=10, to=1200, width=5,
+                   textvariable=self.autosave_interval_var).pack(side=tk.LEFT, padx=5)
+        ttk.Label(autosave_frame, text="seconds").pack(side=tk.LEFT)
+        self.autosave_interval_var.trace_add('write', lambda *a: self._clamp_and_save_interval())
+
         # Theme
         theme_frame = ttk.Frame(container)
         theme_frame.pack(fill=tk.X, pady=5)
@@ -2236,19 +3438,23 @@ class SettingsDialog(tk.Toplevel):
         
         self.bind('<Escape>', lambda e: self.destroy())
 
-    def _select_reopen(self, value):
-        self.reopen_var.set(value)
-        self._update_reopen_buttons()
-        self._auto_save()
+    def _clamp_and_save_interval(self):
+        """Clamp autosave interval to valid range after a delay."""
+        if hasattr(self, '_clamp_after') and self._clamp_after:
+            self.after_cancel(self._clamp_after)
+        self._clamp_after = self.after(500, self._do_clamp_interval)
 
-    def _update_reopen_buttons(self):
-        selected = self.reopen_var.get()
-        style = ttk.Style()
-        for value, btn in self._reopen_buttons.items():
-            if value == selected:
-                btn.state(['pressed'])
-            else:
-                btn.state(['!pressed'])
+    def _do_clamp_interval(self):
+        """Actually clamp and save."""
+        try:
+            val = self.autosave_interval_var.get()
+            if val < 10:
+                self.autosave_interval_var.set(10)
+            elif val > 1200:
+                self.autosave_interval_var.set(1200)
+        except (tk.TclError, ValueError):
+            return
+        self._auto_save()
 
     def _auto_save(self):
         config = self.parent._load_config()
@@ -2256,6 +3462,12 @@ class SettingsDialog(tk.Toplevel):
         config["window_size"] = self.size_var.get()
         config["fullscreen"] = self.fullscreen_var.get()
         config["auto_collapse_vfs"] = self.auto_collapse_var.get()
+        config["auto_save_enabled"] = self.autosave_var.get()
+        try:
+            interval = max(10, min(1200, self.autosave_interval_var.get()))
+        except (tk.TclError, ValueError):
+            interval = 60
+        config["auto_save_interval"] = interval
         config["theme"] = self.theme_var.get()
         try:
             with open(self.parent.CONFIG_FILE, 'w') as f:
@@ -2265,6 +3477,7 @@ class SettingsDialog(tk.Toplevel):
         
         self.parent._auto_collapse_vfs = self.auto_collapse_var.get()
         self.parent._apply_theme(self.theme_var.get())
+        self.parent._restart_auto_save()
 
 
 # --- Link Utilities ---
@@ -2466,6 +3679,7 @@ class TextEditor(ttk.Frame):
         self.text_widget.bind('<Control-t>', lambda e: 'break')
         self.text_widget.bind('<Control-k>', lambda e: 'break')
         self.text_widget.bind('<Control-d>', lambda e: 'break')
+        self.text_widget.bind('<Control-l>', lambda e: (self._insert_link(), 'break')[1])
         self.text_widget.bind('<ButtonRelease-3>', self._text_right_click)
         self.text_widget.bind('<Return>', self._on_enter)
         self.text_widget.bind('<KeyPress>', self._on_keypress)
@@ -2475,8 +3689,13 @@ class TextEditor(ttk.Frame):
         self.text_widget.bind('<BackSpace>', self._on_backspace)
             
         scrollbar = ttk.Scrollbar(self, command=self.text_widget.yview)
-        self.text_widget.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        def _auto_scroll_text(first, last):
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                scrollbar.pack_forget()
+            else:
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            scrollbar.set(first, last)
+        self.text_widget.configure(yscrollcommand=_auto_scroll_text)
 
     def _renumber_line(self, line_num):
         """Recalculate and update the number on a numbered list line based on same-indent lines above."""
@@ -3145,7 +4364,11 @@ class TimelineEditor(ttk.Frame):
             "Controls:\n"
             "  Right-click — Go to event date\n"
             "  Scroll on scrubbers — Adjust value\n"
-            "  Double-click event — Edit"
+            "  Double-click event — Edit\n\n"
+            "Views:\n"
+            "  📊/📋 — Toggle visual/list view\n"
+            "  🔁 — Manage recurring events\n"
+            "  ★ items — Recurring events"
         )
         _help_tip = [None]
         def _show_help(e):
@@ -3387,10 +4610,12 @@ class TimelineEditor(ttk.Frame):
         help_btn.pack(side=tk.RIGHT, padx=5)
         _vhelp_text = (
             "Controls:\n"
-            "  Scroll — Pan timeline\n"
+            "  Scroll — Pan timeline & scrub date\n"
             "  Space — Toggle precision mode\n"
             "  Click event — Select & go to date\n"
-            "  Right-click — Context menu\n\n"
+            "  Click ★ — Go to recurring event date\n"
+            "  Right-click — Context menu\n"
+            "  Hover — Show event details\n\n"
             "Precision mode:\n"
             "  Scrolls 1 day at a time"
         )
@@ -5390,11 +6615,14 @@ class TimelineEditor(ttk.Frame):
             def draw_recurring_marker(rx, rec, d):
                 """Draw a recurring event marker (star or bar if multi-day)."""
                 duration = rec.get("duration_days", 1)
+                name = rec.get("name", "")
+                # Estimate text width (~5px per char at size 7)
+                text_width = len(name) * 5 + 16
                 if duration > 1:
                     rx2 = day_to_x(d + duration)
-                    rx2 = max(rx2, rx + 12)
+                    rx2 = max(rx2, rx + 8)  # minimum visible width
                 else:
-                    rx2 = rx + 20
+                    rx2 = rx + text_width
 
                 # Assign lane
                 lane = 0
@@ -5412,16 +6640,16 @@ class TimelineEditor(ttk.Frame):
 
                 if duration > 1:
                     canvas.create_rectangle(rx, ry - 6, rx2, ry + 6,
-                                          fill="#DAA520", outline="#FFD700", width=1, tags=("recurring",))
+                                          fill="#B8860B", outline="#FFD700", width=1, tags=("recurring",))
                     canvas.create_text(rx + 3, ry, text=rec["name"], anchor="w",
-                                     fill="#000000", font=('Helvetica', 7, 'bold'), tags=("recurring",))
+                                     fill="#ffffff", font=('Helvetica', 7, 'bold'), tags=("recurring",))
                     self._visual_recurring_rects.append((rx, ry - 6, rx2, ry + 6, rec, d))
                 else:
                     canvas.create_text(rx, ry, text="★", fill="#FFD700",
                                      font=('Helvetica', 10), tags=("recurring",))
-                    canvas.create_text(rx, ry - 12, text=rec["name"], fill="#FFD700",
-                                     font=('Helvetica', 7), tags=("recurring",))
-                    self._visual_recurring_rects.append((rx - 10, ry - 20, rx + 10, ry + 8, rec, d))
+                    canvas.create_text(rx + 12, ry, text=name, anchor="w", fill="#FFD700",
+                                     font=('Helvetica', 7, 'bold'), tags=("recurring",))
+                    self._visual_recurring_rects.append((rx - 4, ry - 8, rx2, ry + 8, rec, d))
 
             for rec in recurring:
                 rule = rec.get("rule", {})
@@ -6167,7 +7395,15 @@ class TimelineEventDialog(tk.Toplevel):
         }
         
         if self.end_time_enabled.get():
-            result_data["end_time"] = self._get_time_data("end")
+            end_time = self._get_time_data("end")
+            # Remove end_time if it's the same as start_time (single day event)
+            if (end_time.get("age") == result_data["start_time"].get("age") and
+                end_time.get("year") == result_data["start_time"].get("year") and
+                end_time.get("month") == result_data["start_time"].get("month") and
+                end_time.get("day_of_month") == result_data["start_time"].get("day_of_month")):
+                pass  # Don't set end_time
+            else:
+                result_data["end_time"] = end_time
         
         self.result = result_data
         self.destroy()
@@ -6823,6 +8059,8 @@ class ImageViewer(ttk.Frame):
         help_btn.pack(side=tk.RIGHT, padx=5)
         _help_text = (
             "Controls:\n"
+            "  Scroll — Zoom in/out (at cursor)\n"
+            "  Middle-drag — Pan image\n"
             "  Right-click — Place/edit pins & labels\n"
             "  Shift+Drag — Reposition pins & labels\n"
             "  Hover pin — Show note (after 800ms)\n"
@@ -6854,14 +8092,16 @@ class ImageViewer(ttk.Frame):
         self.canvas = tk.Canvas(canvas_frame, bg="#2b2b2b")
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vscroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
-        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        hscroll = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.canvas.xview)
-        hscroll.pack(fill=tk.X)
-        self.canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Bindings - use Button-3 for right-click (works on both Windows and Linux)
         self.canvas.bind('<Button-3>', self._on_right_click)
         self.canvas.bind('<Motion>', self._on_hover)
+        self.canvas.bind('<MouseWheel>', self._on_scroll_zoom)
+        self.canvas.bind('<Button-4>', lambda e: self._on_scroll_zoom_linux(1))
+        self.canvas.bind('<Button-5>', lambda e: self._on_scroll_zoom_linux(-1))
+        self.canvas.bind('<ButtonPress-2>', self._on_pan_start)
+        self.canvas.bind('<B2-Motion>', self._on_pan_motion)
         self._tooltip = None
         self._hover_pin = None
         self._drag_label_idx = None
@@ -6941,9 +8181,25 @@ class ImageViewer(ttk.Frame):
 
         abs_path = os.path.normpath(os.path.join(save_dir, rel_path))
         if not os.path.isfile(abs_path):
-            self.canvas.create_text(200, 100, text=f"File not found:\n{rel_path}",
-                                   fill="gray", font=('Helvetica', 12))
-            return
+            # Prompt user to locate the file
+            if messagebox.askyesno("File Not Found",
+                f"Image not found:\n{rel_path}\n\nWould you like to locate it manually?"):
+                new_path = filedialog.askopenfilename(
+                    title=f"Locate: {os.path.basename(rel_path)}",
+                    filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("All Files", "*.*")])
+                if new_path:
+                    new_rel = os.path.relpath(new_path, save_dir)
+                    self.path_var.set(new_rel)
+                    self._image_path = new_rel
+                    abs_path = new_path
+                else:
+                    self.canvas.create_text(200, 100, text=f"File not found:\n{rel_path}",
+                                           fill="gray", font=('Helvetica', 12))
+                    return
+            else:
+                self.canvas.create_text(200, 100, text=f"File not found:\n{rel_path}",
+                                       fill="gray", font=('Helvetica', 12))
+                return
 
         try:
             img = Image.open(abs_path)
@@ -7034,6 +8290,95 @@ class ImageViewer(ttk.Frame):
             self._img_scale = 1.0
             self.canvas.create_image(0, 0, anchor="nw", image=self.image_ref, tags=("bg_image",))
             self.canvas.configure(scrollregion=(0, 0, img.width, img.height))
+        self._draw_markers()
+
+    def _on_pan_start(self, event):
+        """Start panning with middle mouse button."""
+        self._pan_start_pos = (event.x, event.y)
+
+    def _on_pan_motion(self, event):
+        """Pan the image with middle mouse drag."""
+        if not hasattr(self, '_pan_start_pos') or not self._orig_image:
+            return
+        dx = event.x - self._pan_start_pos[0]
+        dy = event.y - self._pan_start_pos[1]
+        self._pan_start_pos = (event.x, event.y)
+        ox, oy = self._img_offset
+        self._img_offset = (ox + dx, oy + dy)
+        from PIL import Image, ImageTk
+        new_w = max(1, int(self._orig_image.width * self._img_scale))
+        new_h = max(1, int(self._orig_image.height * self._img_scale))
+        ox, oy = self._img_offset
+        self.canvas.delete("all")
+        display_img = self._orig_image.resize((new_w, new_h), Image.NEAREST)
+        self.image_ref = ImageTk.PhotoImage(display_img)
+        self.canvas.create_image(ox, oy, anchor="nw", image=self.image_ref, tags=("bg_image",))
+        self._draw_markers()
+        # Schedule HQ redraw after pan settles
+        if hasattr(self, '_hq_after') and self._hq_after:
+            self.after_cancel(self._hq_after)
+        self._hq_after = self.after(200, self._redraw_hq)
+
+    def _on_scroll_zoom(self, event):
+        """Zoom in/out with mouse wheel, centered on cursor."""
+        factor = 1.1 if event.delta > 0 else 0.9
+        self._apply_zoom(factor, event.x, event.y)
+
+    def _on_scroll_zoom_linux(self, direction):
+        factor = 1.1 if direction > 0 else 0.9
+        self._apply_zoom(factor)
+
+    def _apply_zoom(self, factor, cx=None, cy=None):
+        """Apply zoom factor centered on cursor position and redisplay."""
+        if not self._orig_image:
+            return
+        from PIL import Image, ImageTk
+        self._fit_mode.set(False)
+        self._fit_btn.config(text="Fit to Window")
+
+        old_scale = self._img_scale
+        self._img_scale = max(0.1, min(5.0, self._img_scale * factor))
+        actual_factor = self._img_scale / old_scale
+
+        new_w = max(1, int(self._orig_image.width * self._img_scale))
+        new_h = max(1, int(self._orig_image.height * self._img_scale))
+
+        # Adjust offset to keep cursor point stationary
+        ox, oy = self._img_offset
+        if cx is not None and cy is not None:
+            ox = int(cx - (cx - ox) * actual_factor)
+            oy = int(cy - (cy - oy) * actual_factor)
+        else:
+            cw = self.canvas.winfo_width() or 400
+            ch = self.canvas.winfo_height() or 400
+            ox = (cw - new_w) // 2
+            oy = (ch - new_h) // 2
+        self._img_offset = (ox, oy)
+
+        # Fast resize for responsiveness
+        display_img = self._orig_image.resize((new_w, new_h), Image.NEAREST)
+        self.image_ref = ImageTk.PhotoImage(display_img)
+        self.canvas.delete("all")
+        self.canvas.create_image(ox, oy, anchor="nw", image=self.image_ref, tags=("bg_image",))
+        self._draw_markers()
+
+        # Schedule high-quality redraw after idle
+        if hasattr(self, '_hq_after') and self._hq_after:
+            self.after_cancel(self._hq_after)
+        self._hq_after = self.after(200, self._redraw_hq)
+
+    def _redraw_hq(self):
+        """Redraw image at high quality after zoom settles."""
+        if not self._orig_image:
+            return
+        from PIL import Image, ImageTk
+        new_w = max(1, int(self._orig_image.width * self._img_scale))
+        new_h = max(1, int(self._orig_image.height * self._img_scale))
+        display_img = self._orig_image.resize((new_w, new_h), Image.LANCZOS)
+        self.image_ref = ImageTk.PhotoImage(display_img)
+        ox, oy = self._img_offset
+        self.canvas.delete("all")
+        self.canvas.create_image(ox, oy, anchor="nw", image=self.image_ref, tags=("bg_image",))
         self._draw_markers()
 
     def _toggle_fit(self):
@@ -7590,109 +8935,124 @@ class LabelEditDialog(tk.Toplevel):
 
 
 class CSVGrid(ttk.Frame):
-    """A tabular data editor for CSV files. (Unchanged for brevity)"""
+    """A tabular data editor using tksheet for proper grid display."""
     def __init__(self, master, initial_content="", name_regex=None, controller=None):
         super().__init__(master)
-        self.name_regex = name_regex 
-        self.controller = controller 
-        self.cell_editor = None 
-        
-        self.grid_container = ttk.Frame(self)
-        self.grid_container.pack(fill=tk.BOTH, expand=True)
+        self.name_regex = name_regex
+        self.controller = controller
 
-        self._load_data_and_ui(initial_content)
+        self._load_data(initial_content)
+        self._setup_ui()
 
 
-    def _load_data_and_ui(self, content):
-        for widget in self.grid_container.winfo_children():
-            widget.destroy()
-            
-        self.data = self._parse_csv(content) 
-        
+    # --- Data Loading ---
+
+    def _load_data(self, content):
+        self.data = self._parse_csv(content)
         if not self.data or not self.data[0]:
-            self.data = [["Col 1", "Col 2"], ["", ""]]
-        
+            self.data = [["Col 1", "Col 2"]]
         self.header = self.data[0]
         self.rows = self.data[1:]
+        self._checkbox_cols = set()
+        self._detect_checkbox_cols()
         self._ensure_blank_row()
-        
-        self._setup_grid_ui()
 
 
     def _parse_csv(self, content):
         if not content.strip():
             return []
-        
         import csv
         from io import StringIO
-        
         try:
             reader = csv.reader(StringIO(content))
             parsed_data = [row for row in reader]
-        except:
-            # Fallback to simple split if CSV parsing fails
+        except Exception:
             lines = content.strip().split('\n')
             parsed_data = [line.split(',') for line in lines]
-            
         if parsed_data:
             header_len = len(parsed_data[0])
             for i in range(len(parsed_data)):
                 while len(parsed_data[i]) < header_len:
-                    parsed_data[i].append("") 
+                    parsed_data[i].append("")
                 if len(parsed_data[i]) > header_len:
                     parsed_data[i] = parsed_data[i][:header_len]
-        
         return parsed_data
 
     def _is_checkbox_value(self, value):
         return str(value).strip().upper() in ("TRUE", "FALSE", "☑", "☐")
 
-    def _get_checkbox_display(self, value):
-        v = str(value).strip().upper()
-        if v in ("TRUE", "☑"):
-            return "☑"
-        if v in ("FALSE", "☐"):
-            return "☐"
-        return value
+    def _is_checkbox_col(self, col_idx):
+        return col_idx in self._checkbox_cols
 
-    def _toggle_checkbox(self, value):
-        v = str(value).strip().upper()
-        return "TRUE" if v in ("FALSE", "☐") else "FALSE"
+    def _detect_checkbox_cols(self):
+        """Detect columns where all non-empty cells are checkbox values."""
+        self._checkbox_cols = set()
+        for col_idx in range(len(self.header)):
+            cells = [row[col_idx] for row in self.rows if col_idx < len(row) and row[col_idx].strip()]
+            if cells and all(self._is_checkbox_value(c) for c in cells):
+                self._checkbox_cols.add(col_idx)
 
-    def _get_cell_display(self, value):
-        """Get display value for a cell, handling checkboxes and links."""
-        if self._is_checkbox_value(value):
-            return self._get_checkbox_display(value)
-        m = LINK_REGEX.match(str(value).strip())
-        if m:
-            display = m.group(2) if m.group(2) else m.group(1).split('/')[-1]
-            return f"⇗ {display}"
-        return value
+    def _get_display_data(self):
+        """Convert internal rows to display format for tksheet."""
+        display = []
+        for row in self.rows:
+            display_row = []
+            for col_idx, cell in enumerate(row):
+                if col_idx in self._checkbox_cols:
+                    display_row.append("☑" if str(cell).strip().upper() in ("TRUE", "☑") else "☐")
+                else:
+                    m = LINK_REGEX.match(str(cell).strip())
+                    if m:
+                        d = m.group(2) if m.group(2) else m.group(1).split('/')[-1]
+                        display_row.append(f"⇗ {d}")
+                    else:
+                        display_row.append(cell)
+            display.append(display_row)
+        return display
 
-    def _setup_grid_ui(self):
+    def _ensure_blank_row(self):
+        """Ensure exactly one blank row at the bottom."""
+        def is_blank(row):
+            return not any(cell.strip() for cell in row if not self._is_checkbox_value(cell))
+        while self.rows and is_blank(self.rows[-1]):
+            self.rows.pop()
+        self.rows.append(self._make_blank_row())
+
+    def _make_blank_row(self):
+        return ["FALSE" if i in self._checkbox_cols else "" for i in range(len(self.header))]
+
+
+    def _setup_ui(self):
+        """Create the tksheet widget and configure it."""
+        config = self.controller._load_config() if self.controller else {}
+        is_dark = config.get("theme", "light") == "dark"
+
         # Help tooltip
-        legend_frame = ttk.Frame(self.grid_container)
-        legend_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        help_btn = ttk.Label(legend_frame, text=" ? ", font=('Helvetica', 9, 'bold'),
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, pady=(0, 2))
+        help_btn = ttk.Label(toolbar, text=" ? ", font=('Helvetica', 9, 'bold'),
                             foreground='gray', relief='groove', padding=(4, 0))
         help_btn.pack(side=tk.RIGHT)
         _help_text = (
-            "Hotkeys:\n"
-            "  Type — Edit cell\n"
-            "  Tab — Next cell\n"
-            "  Enter — Edit selected cell\n"
-            "  Delete — Clear cell\n"
-            "  Space — Toggle checkbox\n"
-            "  Arrow keys — Navigate\n"
-            "  Escape — Cancel edit\n\n"
-            "Controls:\n"
+            "Editing:\n"
             "  Double-click — Edit cell\n"
-            "  Double-click header — Rename column\n"
-            "  Right-click cell — Row options / Link\n"
-            "  Right-click header — Column options\n"
-            "  Drag header — Reorder columns\n"
-            "  Drag row — Reorder rows"
+            "  Enter — Confirm edit\n"
+            "  Escape — Cancel edit\n"
+            "  Delete — Clear selected cells\n\n"
+            "Navigation:\n"
+            "  Arrow keys — Move selection\n"
+            "  Ctrl+A — Select all\n"
+            "  Space — Toggle checkbox\n\n"
+            "Clipboard:\n"
+            "  Ctrl+C — Copy\n"
+            "  Ctrl+X — Cut\n"
+            "  Ctrl+V — Paste\n"
+            "  Ctrl+Z — Undo\n\n"
+            "Right-click:\n"
+            "  On cell — Link to File / Open Link\n"
+            "  On header — Add/Rename/Delete column\n"
+            "               Set column as checkbox\n"
+            "  On row number — Add/Delete row"
         )
         _help_tip = [None]
         def _show_help(e):
@@ -7709,995 +9069,423 @@ class CSVGrid(ttk.Frame):
                 _help_tip[0] = None
         help_btn.bind("<Enter>", _show_help)
         help_btn.bind("<Leave>", _hide_help)
-        
-        tree_frame = ttk.Frame(self.grid_container)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.tree = ttk.Treeview(tree_frame, columns=self.header, show='headings', selectmode='none')
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Cell selection state
-        self._selected_cell = None  # (item_id, col_index)
-        self._cell_highlight = None  # Deprecated, kept for safety
-        self._cell_borders = []  # Border frames for cell highlight
-        
-        # Configure treeview with visible grid lines
-        # Using fieldbackground as the "grid line" color between rows
-        style = ttk.Style()
-        config = self.controller._load_config() if self.controller else {}
-        is_dark = config.get("theme", "light") == "dark"
+
+        self.sheet = Sheet(
+            self,
+            headers=list(self.header),
+            data=self._get_display_data(),
+            show_x_scrollbar=True,
+            show_y_scrollbar=True,
+            height=400,
+            width=600,
+        )
+        self.sheet.pack(fill=tk.BOTH, expand=True)
+
+        # Enable interactions
+        self.sheet.enable_bindings(
+            "single_select", "drag_select",
+            "column_select", "row_select",
+            "column_width_resize", "row_height_resize",
+            "arrowkeys",
+            "copy", "paste", "cut", "delete",
+            "edit_cell", "undo",
+        )
+
+        # Set up checkbox columns with center alignment and readonly
+        for col_idx in self._checkbox_cols:
+            self.sheet.align_columns(col_idx, "center")
+            self.sheet.readonly_columns(col_idx)
         if is_dark:
-            style.configure("CSVGrid.Treeview", rowheight=26,
-                           fieldbackground="#3c3c3c", borderwidth=1, relief="solid",
-                           foreground="#e0e0e0")
-            style.configure("CSVGrid.Treeview.Heading", relief="raised", borderwidth=2,
-                           font=('Helvetica', 9, 'bold'), background="#4a4a4a", foreground="#e0e0e0")
-            style.map("CSVGrid.Treeview.Heading",
-                     foreground=[("active", "#000000")],
-                     background=[("active", "#606060")])
+            self.sheet.set_options(
+                table_bg="#2b2b2b", table_fg="#e0e0e0",
+                header_bg="#4a4a4a", header_fg="#e0e0e0",
+                index_bg="#3c3c3c", index_fg="#e0e0e0",
+                top_left_bg="#3c3c3c",
+                frame_bg="#2b2b2b",
+                table_grid_fg="#555555",
+                header_grid_fg="#555555",
+            )
         else:
-            style.configure("CSVGrid.Treeview", rowheight=26,
-                           fieldbackground="#c0c0c0", borderwidth=1, relief="solid",
-                           foreground="#000000")
-            style.configure("CSVGrid.Treeview.Heading", relief="raised", borderwidth=2,
-                           font=('Helvetica', 9, 'bold'), background="#d0d0d0", foreground="#000000")
-        self.tree.configure(style="CSVGrid.Treeview")
-        
-        for col in self.header:
-            # Use | separator in column display via stretch
-            self.tree.column(col, anchor="w", width=120, minwidth=60)
-            self.tree.heading(col, text=col)
+            self.sheet.set_options(
+                table_bg="#ffffff", table_fg="#000000",
+                header_bg="#d0d0d0", header_fg="#000000",
+                index_bg="#f0f0f0", index_fg="#000000",
+                top_left_bg="#e0e0e0",
+                frame_bg="#f0f0f0",
+                table_grid_fg="#c0c0c0",
+                header_grid_fg="#aaaaaa",
+            )
 
-        for i, row in enumerate(self.rows):
-            row_to_insert = row[:len(self.header)] if len(row) > len(self.header) else row + [""] * (len(self.header) - len(row))
-            display_row = [self._get_cell_display(cell) for cell in row_to_insert]
-            tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.tree.insert('', 'end', values=display_row, tags=(tag,))
+        # Bind events
+        self.sheet.extra_bindings("end_edit_cell", self._on_cell_edit)
+        self.sheet.extra_bindings("edit_cell", self._on_cell_edit)
+        self.sheet.extra_bindings("cell_select", self._on_cell_select)
 
-        # Auto-center columns where all values are checkboxes
-        for col_idx, col in enumerate(self.header):
-            if self.rows and all(self._is_checkbox_value(row[col_idx]) for row in self.rows if col_idx < len(row)):
-                self.tree.column(col, anchor="center")
-            
-        # Row colors create visible horizontal separation against the gray fieldbackground
-        if is_dark:
-            self.tree.tag_configure("evenrow", background="#3c3c3c", foreground="#e0e0e0")
-            self.tree.tag_configure("oddrow", background="#333333", foreground="#e0e0e0")
-        else:
-            self.tree.tag_configure("evenrow", background="#ffffff", foreground="#000000")
-            self.tree.tag_configure("oddrow", background="#f4f4f4", foreground="#000000")
+        # Right-click menu
+        self.sheet.bind("<3>", self._on_right_click)
+        self.sheet.CH.bind("<3>", self._on_header_right_click)
+        self.sheet.RI.bind("<3>", self._on_row_index_right_click)
 
-        vscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vscroll.set)
-        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # Bind click on link cells
+        self.sheet.extra_bindings("cell_select", self._on_cell_select)
 
-        hscroll = ttk.Scrollbar(self.grid_container, orient=tk.HORIZONTAL, command=self.tree.xview)
-        self.tree.configure(xscrollcommand=hscroll.set)
-        hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        # Keyboard: spacebar for checkbox toggle
+        self.sheet.bind("<space>", self._on_spacebar)
+        self.sheet.bind("<Control-a>", self._select_all)
+        # Click to toggle checkboxes
+        self.sheet.MT.bind("<ButtonRelease-1>", self._on_click_toggle, add="+")
+        # Select first cell on arrow key if nothing selected
+        for key in ("<Up>", "<Down>", "<Left>", "<Right>"):
+            self.sheet.bind(key, self._ensure_selection, add="+")
 
-        self.tree.bind('<Double-1>', self._on_double_click)
-        self.tree.bind('<Delete>', self._on_delete_key)
-        self.tree.bind('<ButtonRelease-3>', self._on_right_click)
-        self.tree.bind('<Tab>', self._on_tab_key)
-        self.tree.bind('<Return>', self._on_enter_key)
-        self.tree.bind('<ButtonRelease-1>', self._on_single_click)
-        self.tree.bind('<Up>', self._on_arrow_up)
-        self.tree.bind('<Down>', self._on_arrow_down)
-        self.tree.bind('<Left>', self._on_arrow_left)
-        self.tree.bind('<Right>', self._on_arrow_right)
-        self.tree.bind('<space>', self._on_spacebar)
-        self.tree.bind('<KeyPress>', self._on_keypress_capture)
-        
-        # Column header drag-and-drop
-        self._col_drag_index = None
-        self.tree.bind('<ButtonPress-1>', self._on_col_drag_start, add='+')
-        self.tree.bind('<B1-Motion>', self._on_col_drag_motion)
-        self.tree.bind('<ButtonRelease-1>', self._on_col_drag_drop, add='+')
+    # --- Event Handlers ---
 
-        # Row drag-and-drop reordering
-        self._row_drag_item = None
-        self._row_drop_indicator = None
-        self.tree.bind('<ButtonPress-1>', self._on_row_drag_start, add='+')
-        self.tree.bind('<B1-Motion>', self._on_row_drag_motion, add='+')
-        self.tree.bind('<ButtonRelease-1>', self._on_row_drag_drop, add='+')
-
-    def _on_col_drag_start(self, event):
-        if self.tree.identify("region", event.x, event.y) == "heading":
-            col_id = self.tree.identify_column(event.x)
-            self._col_drag_index = int(col_id.replace('#', '')) - 1
-            self._col_drag_start_x = event.x
-            self._col_drag_active = False
-            self._col_drop_target = None
-        else:
-            self._col_drag_index = None
-
-    def _on_col_drag_motion(self, event):
-        if self._col_drag_index is None:
-            return
-
-        # Require minimum 8px drag before activating
-        if not self._col_drag_active:
-            if abs(event.x - self._col_drag_start_x) < 8:
-                return
-            self._col_drag_active = True
-
-        self.tree.config(cursor="sb_h_double_arrow")
-        
-        # Determine drop target
-        if self.tree.identify("region", event.x, event.y) == "heading":
-            col_id = self.tree.identify_column(event.x)
-            if col_id:
-                drop_idx = int(col_id.replace('#', '')) - 1
-                if drop_idx != self._col_drag_index and drop_idx != self._col_drop_target:
-                    self._col_drop_target = drop_idx
-                    self._show_col_gap(drop_idx)
-        else:
-            if self._col_drop_target is not None:
-                self._col_drop_target = None
-                self._remove_col_gap()
-
-    def _show_col_gap(self, drop_idx):
-        """Insert a blank spacer column at the drop position."""
-        self._remove_col_gap()
-        spacer_id = "__spacer__"
-        cols = list(self.tree["columns"])
-        insert_pos = drop_idx if drop_idx < self._col_drag_index else drop_idx + 1
-        if insert_pos > len(cols):
-            insert_pos = len(cols)
-        cols.insert(insert_pos, spacer_id)
-        self.tree["columns"] = cols
-        
-        # Configure spacer column - narrow with light blue indicator text
-        self.tree.column(spacer_id, width=30, minwidth=30, stretch=False)
-        self.tree.heading(spacer_id, text="│")
-        
-        # Reconfigure original columns
-        for col in self.header:
-            self.tree.column(col, anchor="w", width=120, minwidth=60)
-            self.tree.heading(col, text=col)
-        
-        # Update row values to include a blue bar character in the spacer column
-        for item_id in self.tree.get_children():
-            values = list(self.tree.item(item_id, 'values'))
-            # Insert spacer value at the same position
-            values.insert(insert_pos, "│")
-            self.tree.item(item_id, values=values)
-        
-        # Tag configure for light blue background on all rows
-        self.tree.tag_configure('evenrow', background='#ffffff')
-        self.tree.tag_configure('oddrow', background='#f4f4f4')
-        
-        self._col_gap_active = True
-        self._col_gap_pos = insert_pos
-
-    def _remove_col_gap(self):
-        """Remove the spacer column if present."""
-        if not getattr(self, '_col_gap_active', False):
-            return
-        cols = list(self.tree["columns"])
-        if "__spacer__" in cols:
-            gap_pos = getattr(self, '_col_gap_pos', None)
-            # Remove spacer values from rows
-            if gap_pos is not None:
-                for item_id in self.tree.get_children():
-                    values = list(self.tree.item(item_id, 'values'))
-                    if gap_pos < len(values):
-                        values.pop(gap_pos)
-                    self.tree.item(item_id, values=values)
-            cols.remove("__spacer__")
-            self.tree["columns"] = cols
-            # Reconfigure columns
-            for col in self.header:
-                self.tree.column(col, anchor="w", width=120, minwidth=60)
-                self.tree.heading(col, text=col)
-        self._col_gap_active = False
-
-    def _on_col_drag_drop(self, event):
-        if self._col_drag_index is None:
-            return
-        self.tree.config(cursor="")
-        self._remove_col_gap()
-        
-        if self.tree.identify("region", event.x, event.y) != "heading":
-            self._col_drag_index = None
-            return
-        col_id = self.tree.identify_column(event.x)
-        drop_index = int(col_id.replace('#', '')) - 1
-        src = self._col_drag_index
-        self._col_drag_index = None
-        if src == drop_index or src < 0 or drop_index < 0:
-            return
-        if src >= len(self.header) or drop_index >= len(self.header):
-            return
-        # Collect current data from treeview
-        all_rows = []
-        for item_id in self.tree.get_children():
-            row = []
-            for v in self.tree.item(item_id, 'values'):
-                s = str(v)
-                if s == "☑":
-                    row.append("TRUE")
-                elif s == "☐":
-                    row.append("FALSE")
-                else:
-                    row.append(s)
-            all_rows.append(row)
-        # Reorder header
-        col = self.header.pop(src)
-        self.header.insert(drop_index, col)
-        # Reorder all rows
-        for row in all_rows:
-            if len(row) > src:
-                val = row.pop(src)
-                row.insert(drop_index, val)
-        # Update internal state and rebuild
-        self.rows = all_rows
-        full_data = [self.header] + self.rows
-        updated_content = self._list_to_csv(full_data)
-        self._load_data_and_ui(updated_content)
-
-    def _on_row_drag_start(self, event):
-        """Start row drag if clicking on a cell region."""
-        if self.tree.identify("region", event.x, event.y) == "cell":
-            item = self.tree.identify_row(event.y)
-            if item:
-                self._row_drag_item = item
-                self._row_drag_start_y = event.y
-                self._row_drag_active = False
-                self._row_drop_insert_index = None
-            else:
-                self._row_drag_item = None
-        else:
-            self._row_drag_item = None
-
-    def _on_row_drag_motion(self, event):
-        """Show insertion indicator during row drag."""
-        if not self._row_drag_item or self._col_drag_index is not None:
-            return
-
-        # Require minimum 8px drag before activating
-        if not self._row_drag_active:
-            if abs(event.y - self._row_drag_start_y) < 8:
-                return
-            self._row_drag_active = True
-
-        target = self.tree.identify_row(event.y)
-
-        if not target or target == self._row_drag_item or target == self._row_drop_indicator:
-            return
-
-        bbox = self.tree.bbox(target)
-        if not bbox:
-            return
-
-        x, y, w, h = bbox
-        rel_y = event.y - y
-
-        # Calculate insert index excluding the indicator from the item list
-        real_items = [i for i in self.tree.get_children() if i != self._row_drop_indicator]
-        if target not in real_items:
-            return
-        target_index = real_items.index(target)
-        insert_index = target_index if rel_y < h / 2 else target_index + 1
-
-        # Only update if position changed
-        if insert_index == self._row_drop_insert_index:
-            return
-        self._row_drop_insert_index = insert_index
-
-        # Clear previous indicator
-        if self._row_drop_indicator:
-            try:
-                self.tree.delete(self._row_drop_indicator)
-            except Exception:
-                pass
-            self._row_drop_indicator = None
-
-        # Determine tree insert position (accounting for items in actual tree)
-        all_items = list(self.tree.get_children())
-        if insert_index < len(real_items):
-            tree_insert_index = all_items.index(real_items[insert_index])
-        else:
-            tree_insert_index = 'end'
-
-        self.tree.config(cursor="hand2")
-        self._row_drop_indicator = self.tree.insert('', tree_insert_index,
-                                                     values=['━' * 10] * len(self.header),
-                                                     tags=('row_spacer',))
-        self.tree.tag_configure('row_spacer', foreground='#1976D2', background='#E3F2FD')
-
-    def _on_row_drag_drop(self, event):
-        """Complete row reorder on drop."""
-        if not self._row_drag_item or self._col_drag_index is not None or not self._row_drag_active:
-            if self._row_drop_indicator:
-                try:
-                    self.tree.delete(self._row_drop_indicator)
-                except Exception:
-                    pass
-                self._row_drop_indicator = None
-            self._row_drag_item = None
-            return
-
-        self.tree.config(cursor="")
-
-        # Get source index before removing indicator (exclude indicator from count)
-        all_items = [i for i in self.tree.get_children() if i != self._row_drop_indicator]
-        src_index = all_items.index(self._row_drag_item) if self._row_drag_item in all_items else None
-        drop_index = self._row_drop_insert_index
-
-        # Remove indicator
-        if self._row_drop_indicator:
-            try:
-                self.tree.delete(self._row_drop_indicator)
-            except Exception:
-                pass
-            self._row_drop_indicator = None
-
-        self._row_drag_item = None
-        self._row_drop_insert_index = None
-
-        if src_index is None or drop_index is None:
-            return
-
-        # Adjust drop_index: the indicator was occupying a slot, so account for items before it
-        if drop_index > src_index:
-            drop_index -= 1
-
-        if drop_index == src_index:
-            return
-
-        # Reorder rows data
-        row = self.rows.pop(src_index)
-        self.rows.insert(drop_index, row)
-
-        full_data = [self.header] + self.rows
-        updated_content = self._list_to_csv(full_data)
-        self._load_data_and_ui(updated_content)
-
-    def _on_single_click(self, event):
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            return
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
-            return
-        item_id = self.tree.identify_row(event.y)
-        column_id = self.tree.identify_column(event.x)
-        if not item_id or not column_id:
-            return
-        col_index = int(column_id.replace('#', '')) - 1
-        if col_index < 0 or col_index >= len(self.header):
-            return
-        
-        # Toggle checkbox if applicable (before highlight to avoid redraw glitch)
-        current_values = list(self.tree.item(item_id, 'values'))
-        current_value = current_values[col_index]
-        if self._is_checkbox_value(current_value):
-            new_value = self._toggle_checkbox(current_value)
-            current_values[col_index] = self._get_checkbox_display(new_value)
-            self.tree.item(item_id, values=current_values)
-            self.tree.update_idletasks()
-        
-        # Select this cell
-        self._select_cell(item_id, col_index)
-        
-        # Ensure tree has focus for keyboard navigation
-        self.tree.focus_set()
-
-    def _select_cell(self, item_id, col_index):
-        """Select a specific cell and show highlight overlay."""
-        self._selected_cell = (item_id, col_index)
-        self._update_cell_highlight()
-
-    def _update_cell_highlight(self):
-        """Draw a border around the selected cell without covering its content."""
-        # Remove old highlight borders
-        for border in getattr(self, '_cell_borders', []):
-            border.destroy()
-        self._cell_borders = []
-        
-        if not self._selected_cell:
-            return
-        
-        item_id, col_index = self._selected_cell
-        column_id = f"#{col_index + 1}"
-        bbox = self.tree.bbox(item_id, column_id)
-        if not bbox:
-            return
-        
-        x, y, w, h = bbox
-        color = "#1976D2"
-        thickness = 2
-        
-        # Top border
-        top = tk.Frame(self.tree, bg=color, height=thickness)
-        top.place(x=x, y=y, width=w, height=thickness)
-        # Bottom border
-        bot = tk.Frame(self.tree, bg=color, height=thickness)
-        bot.place(x=x, y=y + h - thickness, width=w, height=thickness)
-        # Left border
-        left = tk.Frame(self.tree, bg=color, width=thickness)
-        left.place(x=x, y=y, width=thickness, height=h)
-        # Right border
-        right = tk.Frame(self.tree, bg=color, width=thickness)
-        right.place(x=x + w - thickness, y=y, width=thickness, height=h)
-        
-        self._cell_borders = [top, bot, left, right]
-        
-        # Make borders click-through by forwarding events
-        for border in self._cell_borders:
-            border.bind('<Button-1>', self._border_click)
-            border.bind('<Double-1>', self._border_dblclick)
-            border.bind('<Button-3>', self._border_rightclick)
-
-    def _border_click(self, event):
-        """Forward click from border to the tree."""
-        # Get absolute position and find the cell
-        abs_x = event.widget.winfo_x() + event.x
-        abs_y = event.widget.winfo_y() + event.y
-        item = self.tree.identify_row(abs_y)
-        col = self.tree.identify_column(abs_x)
-        if item and col:
-            ci = int(col.replace('#', '')) - 1
-            if 0 <= ci < len(self.header):
-                self._select_cell(item, ci)
-                vals = list(self.tree.item(item, 'values'))
-                if self._is_checkbox_value(vals[ci]):
-                    vals[ci] = self._get_checkbox_display(self._toggle_checkbox(vals[ci]))
-                    self.tree.item(item, values=vals)
-
-    def _border_dblclick(self, event):
-        """Forward double-click from border to edit cell."""
-        abs_x = event.widget.winfo_x() + event.x
-        abs_y = event.widget.winfo_y() + event.y
-        item = self.tree.identify_row(abs_y)
-        col = self.tree.identify_column(abs_x)
-        if item and col:
-            ci = int(col.replace('#', '')) - 1
-            if 0 <= ci < len(self.header):
-                self._edit_cell(item, ci)
-
-    def _border_rightclick(self, event):
-        """Forward right-click from border."""
-        abs_x = event.widget.winfo_x() + event.x
-        abs_y = event.widget.winfo_y() + event.y
-        self.tree.event_generate('<ButtonRelease-3>', x=abs_x, y=abs_y)
-
-    def _on_arrow_up(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        items = list(self.tree.get_children())
-        idx = items.index(item_id) if item_id in items else -1
-        if idx > 0:
-            self._select_cell(items[idx - 1], col_index)
-        return 'break'
-
-    def _on_arrow_down(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        items = list(self.tree.get_children())
-        idx = items.index(item_id) if item_id in items else -1
-        if idx < len(items) - 1:
-            self._select_cell(items[idx + 1], col_index)
-        return 'break'
-
-    def _on_arrow_left(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        if col_index > 0:
-            self._select_cell(item_id, col_index - 1)
-        return 'break'
-
-    def _on_arrow_right(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        if col_index < len(self.header) - 1:
-            self._select_cell(item_id, col_index + 1)
-        return 'break'
-
-    def _on_spacebar(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        vals = list(self.tree.item(item_id, 'values'))
-        if self._is_checkbox_value(vals[col_index]):
-            vals[col_index] = self._get_checkbox_display(self._toggle_checkbox(vals[col_index]))
-            self.tree.item(item_id, values=vals)
-        return 'break'
-
-    def _on_keypress_capture(self, event):
-        """Start editing the selected cell when a printable character is typed."""
+    def _ensure_selection(self, event):
+        """Select cell 0,0 if nothing is currently selected."""
         try:
-            if not self._selected_cell or not event.char or len(event.char) != 1 or event.char < ' ':
-                return
-            # Block Ctrl and Alt combos cross-platform
-            if event.state & 0x4:  # Control on both platforms
-                return
-            if (event.state & 0x8) and sys.platform != 'win32':  # Alt on Linux
-                return
-            if (event.state & 0x20000) and sys.platform == 'win32':  # Alt on Windows
-                return
-            if event.keysym in ('space', 'Tab', 'Return', 'Delete', 'Escape',
-                                'Up', 'Down', 'Left', 'Right'):
-                return
-            item_id, col_index = self._selected_cell
-            vals = list(self.tree.item(item_id, 'values'))
-            if col_index < len(vals) and self._is_checkbox_value(vals[col_index]):
-                return
-            self._edit_cell(item_id, col_index, clear=True)
-            if self.cell_editor and self.cell_editor.winfo_exists():
-                self.cell_editor.delete(0, tk.END)
-                self.cell_editor.insert(0, event.char)
-                self.cell_editor.icursor(tk.END)
-            return 'break'
+            selected = self.sheet.get_currently_selected()
+            if selected.row is None:
+                self.sheet.select_cell(0, 0)
         except Exception:
-            pass
-            self.cell_editor.delete(0, tk.END)
-            self.cell_editor.insert(0, event.char)
-            self.cell_editor.icursor(tk.END)
-        return 'break'
+            self.sheet.select_cell(0, 0)
+
+    def _select_all(self, event):
+        """Select all cells."""
+        self.sheet.select_all()
+        return "break"
+
 
     def _on_right_click(self, event):
-        region = self.tree.identify("region", event.x, event.y)
-        
-        if region == "heading":
-            column_id = self.tree.identify_column(event.x)
-            col_index = int(column_id.replace('#', '')) - 1
-            if 0 <= col_index < len(self.header):
-                self._show_column_menu(event, col_index)
-        elif region == "cell":
-            item_id = self.tree.identify_row(event.y)
-            column_id = self.tree.identify_column(event.x)
-            col_index = int(column_id.replace('#', '')) - 1 if column_id else 0
-            if item_id:
-                self._show_row_menu(event, item_id, col_index)
-
-    def _on_double_click(self, event):
-        region = self.tree.identify("region", event.x, event.y)
-        
-        if region == "heading":
-            column_id = self.tree.identify_column(event.x)
-            col_index = int(column_id.replace('#', '')) - 1
-            if 0 <= col_index < len(self.header):
-                self._rename_column(col_index)
-            return
-        
-        if region != "cell": return
-        
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            self.cell_editor.focus_set() 
-            return 
-
-        item_id = self.tree.identify_row(event.y)
-        column_id = self.tree.identify_column(event.x)
-        
-        col_index = int(column_id.replace('#', '')) - 1 
-        
-        if col_index < 0 or col_index >= len(self.header):
-            return
-
-        # Clear highlight before placing editor
-        for b in getattr(self, '_cell_borders', []):
-            b.destroy()
-        self._cell_borders = []
-        self._selected_cell = (item_id, col_index)
-
-        current_values = list(self.tree.item(item_id, 'values'))
-        current_value = current_values[col_index]
-
-        if self._is_checkbox_value(current_value):
-            return
-
-        self._edit_cell(item_id, col_index)
-
-    def _save_edit_and_focus_tree(self, item_id, col_index, new_value):
-        self._save_edit(item_id, col_index, new_value)
-        self.tree.focus_set()
-        self._select_cell(item_id, col_index)
-        return 'break'
-
-    def _cancel_edit(self):
-        """Cancel cell editing without saving changes."""
-        self._edit_cancelled = True
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            self.cell_editor.destroy()
-        self.cell_editor = None
-        self.tree.focus_set()
-        if self._selected_cell:
-            self._update_cell_highlight()
-
-    def _on_enter_key(self, event):
-        if self._selected_cell:
-            item_id, col_index = self._selected_cell
-            vals = list(self.tree.item(item_id, 'values'))
-            if col_index < len(vals) and self._is_checkbox_value(vals[col_index]):
-                return 'break'
-            self._edit_cell(item_id, col_index)
-        return 'break'
-
-    def _on_tab_key(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        items = list(self.tree.get_children())
-        if col_index + 1 < len(self.header):
-            self._select_cell(item_id, col_index + 1)
-        else:
-            idx = items.index(item_id) if item_id in items else -1
-            if idx + 1 < len(items):
-                self._select_cell(items[idx + 1], 0)
-            elif items:
-                self._select_cell(items[0], 0)
-        return 'break'
-
-    def _move_to_next_cell(self):
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            current_item = None
-            current_col = 0
-            
-            for item in self.tree.get_children():
-                for col in range(len(self.header)):
-                    column_id = f"#{col + 1}"
-                    bbox = self.tree.bbox(item, column_id)
-                    if bbox and self.cell_editor.winfo_x() == bbox[0] and self.cell_editor.winfo_y() == bbox[1]:
-                        current_item = item
-                        current_col = col
-                        break
-                if current_item:
-                    break
-            
-            # Save current edit
-            self.cell_editor.event_generate('<FocusOut>')
-            
-            if current_item:
-                items = list(self.tree.get_children())
-                if current_col + 1 < len(self.header):
-                    self._select_cell(current_item, current_col + 1)
-                else:
-                    idx = items.index(current_item) if current_item in items else -1
-                    if idx + 1 < len(items):
-                        self._select_cell(items[idx + 1], 0)
-                    elif items:
-                        self._select_cell(items[0], 0)
-
-    def _edit_cell(self, item_id, col_index, clear=False):
-        if col_index >= len(self.header):
-            return
-        
-        # If there's already an active editor, save it first
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            self._saving_edit = True
-            entry_val = self.cell_editor.get()
-            old_cell = self._selected_cell
-            self.cell_editor.destroy()
-            self.cell_editor = None
-            if old_cell:
-                self._do_save_edit(old_cell[0], old_cell[1], entry_val)
-            self._saving_edit = False
-
-        # Clear highlight before placing editor
-        for b in getattr(self, '_cell_borders', []):
-            b.destroy()
-        self._cell_borders = []
-        self._selected_cell = (item_id, col_index)
-            
-        current_values = list(self.tree.item(item_id, 'values'))
-        current_value = "" if clear else (current_values[col_index] if col_index < len(current_values) else "")
-        
-        column_id = f"#{col_index + 1}"
-        bbox = self.tree.bbox(item_id, column_id)
-        if bbox:
-            x, y, width, height = bbox
-            
-            entry_var = tk.StringVar(value=current_value)
-            self.cell_editor = tk.Entry(self.tree, textvariable=entry_var,
-                                        selectbackground="#cde8ff", selectforeground="#000000")
-            self.cell_editor.place(x=x, y=y, width=width, height=height)
-            self._edit_ready = False
-            self.cell_editor.focus_set()
-            if not clear:
-                self.cell_editor.select_range(0, tk.END)
-
-            self.cell_editor.bind("<Return>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
-            self.cell_editor.bind("<Escape>", lambda e: self._cancel_edit())
-            self.cell_editor.bind("<FocusOut>", lambda e, i=item_id, c=col_index, v=entry_var: self._save_edit(i, c, v.get()))
-            self.cell_editor.bind("<Tab>", lambda e: self._move_to_next_cell())
-            # Mark editor as ready after event loop settles
-            self.after(50, self._mark_edit_ready)
-
-    def _mark_edit_ready(self):
-        self._edit_ready = True
-
-    def _do_save_edit(self, item_id, col_index, new_value):
-        """Save cell value without destroying editor (used internally)."""
+        """Show dynamic right-click menu for cells."""
+        # Select the cell under cursor first
         try:
-            current_values_list = list(self.tree.item(item_id, 'values'))
-            if 0 <= col_index < len(current_values_list):
-                current_values_list[col_index] = new_value
-                self.tree.item(item_id, values=current_values_list)
-                row_index = self.tree.index(item_id)
-                if row_index < len(self.rows) and col_index < len(self.rows[row_index]):
-                    raw = self.rows[row_index][col_index]
-                    if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
-                        self.rows[row_index][col_index] = new_value
+            r = self.sheet.identify_row(event, allow_end=False)
+            c = self.sheet.identify_column(event, allow_end=False)
+            if r is not None and c is not None:
+                self.sheet.select_cell(r, c)
+        except Exception:
+            pass
+        menu = tk.Menu(self, tearoff=0)
+        # Check if selected cell has a link
+        try:
+            selected = self.sheet.get_currently_selected()
+            row, col = selected.row, selected.column
+            if row is not None and col is not None and row < len(self.rows) and col < len(self.rows[row]):
+                raw = self.rows[row][col]
+                if LINK_REGEX.match(str(raw).strip()):
+                    menu.add_command(label="Open Link", command=self._open_selected_link)
+                    menu.add_separator()
+        except Exception:
+            pass
+        is_checkbox = False
+        try:
+            selected = self.sheet.get_currently_selected()
+            if selected and selected.column is not None:
+                is_checkbox = selected.column in self._checkbox_cols
+        except Exception:
+            pass
+        if not is_checkbox:
+            menu.add_command(label="Link to File", command=self._link_selected_cell)
+            menu.add_separator()
+        menu.add_command(label="Cut", command=lambda: self.sheet.cut())
+        menu.add_command(label="Copy", command=lambda: self.sheet.copy())
+        menu.add_command(label="Paste", command=lambda: self.sheet.paste())
+        menu.add_command(label="Delete", command=lambda: self.sheet.delete())
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_header_right_click(self, event):
+        """Show right-click menu for column headers."""
+        try:
+            c = self.sheet.identify_column(event, allow_end=False)
+            if c is not None:
+                self.sheet.select_column(c)
+        except Exception:
+            pass
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Add Column", command=self._add_column)
+        menu.add_command(label="Rename Column", command=self._rename_selected_column)
+        menu.add_command(label="Set Column as Checkbox", command=self._set_selected_col_checkbox)
+        menu.add_command(label="Delete Column", command=self._delete_selected_column)
+        menu.tk_popup(event.x_root, event.y_root)
+
+
+    def _on_row_index_right_click(self, event):
+        """Show right-click menu for row index."""
+        try:
+            r = self.sheet.identify_row(event, allow_end=False)
+            if r is not None:
+                self.sheet.select_row(r)
+        except Exception:
+            pass
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Add Row", command=self._add_row)
+        menu.add_command(label="Delete Row", command=self._delete_selected_row)
+        menu.tk_popup(event.x_root, event.y_root)
+
+
+    def _on_begin_edit(self, event):
+        """Block editing on checkbox cells."""
+        try:
+            row, col = event[0], event[1]
+            if col in self._checkbox_cols:
+                return "break"
+        except (TypeError, IndexError, KeyError):
+            pass
+
+    def _on_cell_edit(self, event):
+        """Sync edited cell back to internal data."""
+        try:
+            if isinstance(event, tuple):
+                row, col, new_value = event[0], event[1], event[2]
+            else:
+                row = event.row
+                col = event.column
+                new_value = event.value if hasattr(event, 'value') else event.text
+        except (TypeError, IndexError, KeyError, AttributeError):
+            # Fallback: just rebuild from sheet data
+            self._sync_from_sheet()
+            self._ensure_blank_row()
+            self._rebuild_sheet()
+            return
+        # Grow rows if needed
+        while len(self.rows) <= row:
+            self.rows.append(self._make_blank_row())
+        while len(self.rows[row]) <= col:
+            self.rows[row].append("")
+        # Don't overwrite link data with display text
+        raw = self.rows[row][col]
+        if LINK_REGEX.match(str(raw).strip()) and str(new_value).startswith("⇗ "):
+            return
+        # Checkbox cell: treat any edit as a toggle
+        if col in self._checkbox_cols:
+            current = str(self.rows[row][col]).strip().upper()
+            self.rows[row][col] = "FALSE" if current in ("TRUE", "☑") else "TRUE"
+            self._rebuild_sheet()
+            return
+        self.rows[row][col] = str(new_value) if new_value is not None else ""
+        self._ensure_blank_row()
+        self._rebuild_sheet()
+        self.sheet.select_cell(row, col)
+
+    def _on_cell_select(self, event):
+        """Handle cell selection - no-op for arrow navigation."""
+        pass
+
+
+    def _on_click_toggle(self, event):
+        """Toggle checkbox on mouse click."""
+        try:
+            selected = self.sheet.get_currently_selected()
+            if selected and selected.row is not None:
+                row, col = selected.row, selected.column
+                if col in self._checkbox_cols and row < len(self.rows):
+                    current = str(self.rows[row][col]).strip().upper()
+                    self.rows[row][col] = "FALSE" if current in ("TRUE", "☑") else "TRUE"
+                    self.sheet.set_cell_data(row, col, "☑" if self.rows[row][col] == "TRUE" else "☐")
+                    self.sheet.refresh()
         except Exception:
             pass
 
-    def _save_edit(self, item_id, col_index, new_value):
-        if not self.cell_editor: return
-        if getattr(self, '_saving_edit', False): return
-        if not getattr(self, '_edit_ready', True): return
-        if getattr(self, '_edit_cancelled', False):
-            self._edit_cancelled = False
+    def _follow_link(self, row, col):
+        """Open a linked file."""
+        if not self.controller or row >= len(self.rows) or col >= len(self.rows[row]):
             return
-            
+        raw = self.rows[row][col]
+        m = LINK_REGEX.match(str(raw).strip())
+        if m:
+            path = m.group(1)
+            self.controller._open_file_editor(path.split('/'))
+
+    def _on_rows_moved(self, event):
+        """Sync internal data after row drag-and-drop."""
+        self._sync_from_sheet()
+
+    def _on_cols_moved(self, event):
+        """Sync internal data after column reorder."""
+        self._sync_from_sheet()
+
+    def _on_delete(self, event):
+        """Handle delete key - clear cells."""
+        self._sync_from_sheet()
+
+    def _on_spacebar(self, event):
+        """Toggle checkbox in selected cell."""
+        selected = self.sheet.get_currently_selected()
+        if selected and selected.row is not None:
+            row, col = selected.row, selected.column
+            if col in self._checkbox_cols and row < len(self.rows):
+                current = str(self.rows[row][col]).strip().upper()
+                new_val = "FALSE" if current in ("TRUE", "☑") else "TRUE"
+                self.rows[row][col] = new_val
+                self.sheet.set_cell_data(row, col, "☑" if new_val == "TRUE" else "☐")
+                self.sheet.refresh()
+        return "break"
+
+    # --- Row/Column Operations ---
+
+    def _add_row(self):
+        new_row = self._make_blank_row()
+        # Insert before the trailing blank row
+        insert_idx = len(self.rows) - 1
+        self.rows.insert(insert_idx, [""] * len(self.header))
+        self._rebuild_sheet()
+
+    def _delete_selected_row(self):
+        selected = self.sheet.get_currently_selected()
+        if selected and selected.row is not None:
+            row = selected.row
+            if row < len(self.rows) and messagebox.askyesno("Confirm Delete", "Delete selected row?"):
+                del self.rows[row]
+                self._ensure_blank_row()
+                self._rebuild_sheet()
+
+    def _add_column(self):
+        name = simpledialog.askstring("New Column", "Enter new column header name:", parent=self)
+        if not name:
+            return
+        base_name = name.split('.')[0].strip()
+        if self.name_regex and not self.name_regex.match(base_name):
+            messagebox.showerror("Error", "Header name must only contain letters, numbers, spaces, and hyphens.")
+            return
+        self.header.append(name.strip())
+        for row in self.rows:
+            row.append("")
+        self._rebuild_sheet()
+
+    def _delete_selected_column(self):
+        selected = self.sheet.get_currently_selected()
+        if not selected or selected.column is None:
+            return
+        col_idx = selected.column
+        if len(self.header) <= 1:
+            messagebox.showerror("Error", "Cannot delete the last column.")
+            return
+        col_name = self.header[col_idx]
+        if not messagebox.askyesno("Confirm Delete", f"Delete column '{col_name}'?"):
+            return
+        del self.header[col_idx]
+        for row in self.rows:
+            if col_idx < len(row):
+                del row[col_idx]
+        self._checkbox_cols.discard(col_idx)
+        # Adjust checkbox col indices
+        self._checkbox_cols = {c - 1 if c > col_idx else c for c in self._checkbox_cols}
+        self._rebuild_sheet()
+
+    def _rename_selected_column(self):
+        selected = self.sheet.get_currently_selected()
+        if not selected or selected.column is None:
+            return
+        col_idx = selected.column
+        self._rename_column(col_idx)
+
+    def _rename_column(self, col_idx):
+        old_name = self.header[col_idx]
+        new_name = simpledialog.askstring("Rename Column", f"New name for '{old_name}':",
+                                          parent=self, initialvalue=old_name)
+        if not new_name or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        base_name = new_name.split('.')[0].strip()
+        if self.name_regex and not self.name_regex.match(base_name):
+            messagebox.showerror("Error", "Header name must only contain letters, numbers, spaces, and hyphens.")
+            return
+        if new_name in self.header and new_name != old_name:
+            messagebox.showerror("Error", f"Column '{new_name}' already exists.")
+            return
+        self.header[col_idx] = new_name
+        self.sheet.headers(self.header)
+        self.sheet.refresh()
+
+    def _set_selected_col_checkbox(self):
+        selected = self.sheet.get_currently_selected()
+        if not selected or selected.column is None:
+            return
+        col_idx = selected.column
+        self._checkbox_cols.add(col_idx)
+        for row in self.rows:
+            while len(row) <= col_idx:
+                row.append("")
+            if not self._is_checkbox_value(row[col_idx]):
+                row[col_idx] = "FALSE"
+        self._rebuild_sheet()
+
+    def _open_selected_link(self):
+        """Open the linked file in the selected cell."""
+        if not self.controller:
+            return
         try:
-            current_values_list = list(self.tree.item(item_id, 'values'))
-            
-            if 0 <= col_index < len(current_values_list):
-                current_values_list[col_index] = new_value
-                self.tree.item(item_id, values=current_values_list)
+            selected = self.sheet.get_currently_selected()
+            row, col = selected.row, selected.column
+            if row is None or col is None:
+                return
+            if row < len(self.rows) and col < len(self.rows[row]):
+                raw = self.rows[row][col]
+                m = LINK_REGEX.match(str(raw).strip())
+                if m:
+                    path = m.group(1).split('/')
+                    self.after(10, lambda: self.controller._open_file_editor(path))
+        except Exception:
+            pass
 
-                # Update self.rows to stay in sync
-                row_index = self.tree.index(item_id)
-                # Ensure self.rows has enough entries
-                while len(self.rows) <= row_index:
-                    self.rows.append([""] * len(self.header))
-                while len(self.rows[row_index]) <= col_index:
-                    self.rows[row_index].append("")
-                raw = self.rows[row_index][col_index]
-                if LINK_REGEX.match(str(raw).strip()) and not new_value.startswith("⇗ "):
-                    # Link was removed, store plain text
-                    self.rows[row_index][col_index] = new_value
-                elif not LINK_REGEX.match(str(raw).strip()):
-                    # Non-link cell, always sync
-                    self.rows[row_index][col_index] = new_value
-
-            # Auto-add blank row if last row now has non-checkbox content
-            all_items = self.tree.get_children()
-            if all_items and item_id == all_items[-1]:
-                has_content = any(
-                    str(v).strip() for v in current_values_list
-                    if not self._is_checkbox_value(v)
-                )
-                if has_content:
-                    blank = self._make_blank_row()
-                    display_blank = [self._get_checkbox_display(cell) for cell in blank]
-                    tag = "evenrow" if len(all_items) % 2 == 0 else "oddrow"
-                    self.tree.insert('', 'end', values=display_blank, tags=(tag,))
-            
-        finally:
-            if self.cell_editor and self.cell_editor.winfo_exists():
-                self.cell_editor.destroy()
-            self.cell_editor = None
-            # Restore focus and cell highlight
-            self.tree.focus_set()
-            self._select_cell(item_id, col_index)
-
-    def _show_row_menu(self, event, item_id, col_index=0):
-        """Show context menu for row operations."""
-        menu = tk.Menu(self, tearoff=0)
-
-        # Check if cell has a link
-        row_index = self.tree.index(item_id)
-        if row_index < len(self.rows) and col_index < len(self.rows[row_index]):
-            raw = self.rows[row_index][col_index]
-            m = LINK_REGEX.match(str(raw).strip())
-            if m and self.controller:
-                path = m.group(1)
-                display = m.group(2) if m.group(2) else path.split('/')[-1]
-                menu.add_command(label=f"Open: {display}",
-                               command=lambda p=path: self.controller._open_file_editor(p.split('/')))
-                menu.add_separator()
-
-        menu.add_command(label="Link to File", command=lambda: self._link_cell(item_id, col_index))
-        menu.add_separator()
-        menu.add_command(label="Delete Row", command=lambda: self._delete_row(item_id))
-        
-        popup_menu(menu, event.x_root, event.y_root)
-
-    def _link_cell(self, item_id, col_index):
+    def _link_selected_cell(self):
         """Set a cell value as a link to a VFS file."""
         if not self.controller:
             return
-        picker = VFSFilePicker(self, self.controller.vfs, self.controller.root_name)
+        selected = self.sheet.get_currently_selected()
+        if not selected or selected.row is None:
+            return
+        row, col = selected.row, selected.column
+        picker = VFSFilePicker(self.controller, self.controller.vfs, self.controller.root_name)
         if picker.result:
             path = picker.result
-            current_values = list(self.tree.item(item_id, 'values'))
-            # Use existing cell text as display, or filename
-            raw_val = str(current_values[col_index])
-            # Strip existing link markup if re-linking
-            m = LINK_REGEX.match(raw_val.strip())
+            while len(self.rows) <= row:
+                self.rows.append(self._make_blank_row())
+            while len(self.rows[row]) <= col:
+                self.rows[row].append("")
+            raw_val = self.rows[row][col]
+            m = LINK_REGEX.match(str(raw_val).strip())
             if m:
                 display = m.group(2) if m.group(2) else raw_val
             else:
                 display = raw_val.strip() if raw_val.strip() else path.split('/')[-1]
-            current_values[col_index] = f"⇗ {display}"
-            self.tree.item(item_id, values=current_values)
-            # Store raw link in rows data
-            row_index = self.tree.index(item_id)
-            if row_index < len(self.rows):
-                while len(self.rows[row_index]) <= col_index:
-                    self.rows[row_index].append("")
-                self.rows[row_index][col_index] = f"[[{path}|{display}]]"
+            self.rows[row][col] = f"[[{path}|{display}]]"
+            self.sheet.set_cell_data(row, col, f"⇗ {display}")
+            self.sheet.refresh()
 
-    def _set_cell_checkbox(self, item_id, col_index):
-        """Convert a cell to a checkbox (default FALSE/☐)."""
-        current_values = list(self.tree.item(item_id, 'values'))
-        current_values[col_index] = "☐"
-        self.tree.item(item_id, values=current_values)
+    # --- Sync & Serialization ---
 
-    def _delete_row(self, item_id):
-        """Delete the specified row."""
-        if not messagebox.askyesno("Confirm Delete", "Delete selected row?"):
-            return
-            
-        # Get row index and remove from data
-        row_index = self.tree.index(item_id)
-        
-        if row_index < len(self.rows):
-            del self.rows[row_index]
-            full_data = [self.header] + self.rows
-            updated_content = self._list_to_csv(full_data)
-            self._load_data_and_ui(updated_content)
-
-    def _show_column_menu(self, event, col_index):
-        # Create context menu
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Add Column", command=self._add_column)
-        menu.add_separator()
-        menu.add_command(label="Rename Column", command=lambda: self._rename_column(col_index))
-        menu.add_command(label="Set as Checkbox Column", command=lambda: self._set_column_checkbox(col_index))
-        menu.add_separator()
-        menu.add_command(label="Delete Column", command=lambda: self._delete_column(col_index))
-        
-        # Show menu at mouse position
-        popup_menu(menu, event.x_root, event.y_root)
-
-    def _set_column_checkbox(self, col_index):
-        """Convert all cells in a column to checkboxes."""
-        for item_id in self.tree.get_children():
-            current_values = list(self.tree.item(item_id, 'values'))
-            if not self._is_checkbox_value(current_values[col_index]):
-                current_values[col_index] = "☐"
-            self.tree.item(item_id, values=current_values)
-        self.tree.column(self.header[col_index], anchor="center")
-
-    def _edit_header(self, col_index):
-        old_name = self.header[col_index]
-
-    def _rename_column(self, col_index):
-        old_name = self.header[col_index]
-        new_name = simpledialog.askstring("Rename Column", f"Enter new name for column '{old_name}':", parent=self, initialvalue=old_name)
-        
-        if new_name is None or new_name.strip() == old_name:
-            return
-
-        new_name_stripped = new_name.strip()
-        base_name = new_name_stripped.split('.')[0].strip()
-
-        if self.name_regex and not self.name_regex.match(base_name):
-            messagebox.showerror("Error", "Header name must only contain letters, numbers, spaces, and hyphens.")
-            return
-
-        if new_name_stripped in self.header and new_name_stripped != old_name:
-             messagebox.showerror("Error", f"Column '{new_name_stripped}' already exists.")
-             return
-
-        self.header[col_index] = new_name_stripped
-        updated_content = self.get_content()
-        
-        if self.controller and self.controller.active_file_path:
-            if self.controller._set_file_content(self.controller.active_file_path, updated_content):
-                self._load_data_and_ui(updated_content)
-            else:
-                messagebox.showerror("Internal Error", "Failed to commit updated CSV structure to VFS.")
-        else:
-             messagebox.showerror("Internal Error", "Cannot rename column: Controller reference or active path is missing.")
-
-    def _delete_column(self, col_index):
-        if len(self.header) <= 1:
-            messagebox.showerror("Error", "Cannot delete the last column.")
-            return
-            
-        col_name = self.header[col_index]
-        if not messagebox.askyesno("Confirm Delete", f"Delete column '{col_name}'?"):
-            return
-            
-        # Remove column from header and all rows
-        new_header = [h for i, h in enumerate(self.header) if i != col_index]
-        new_rows = []
-        for row in self.rows:
-            new_row = [cell for i, cell in enumerate(row) if i != col_index]
-            new_rows.append(new_row)
-            
-        full_data = [new_header] + new_rows
-        updated_content = self._list_to_csv(full_data)
-        
-        if self.controller and self.controller.active_file_path:
-            if self.controller._set_file_content(self.controller.active_file_path, updated_content):
-                self._load_data_and_ui(updated_content)
-
-    def _on_delete_key(self, event):
-        if not self._selected_cell:
-            return 'break'
-        item_id, col_index = self._selected_cell
-        current_values = list(self.tree.item(item_id, 'values'))
-        if col_index < len(current_values):
-            if self._is_checkbox_value(current_values[col_index]):
-                current_values[col_index] = "☐"
-            else:
-                current_values[col_index] = ""
-            self.tree.item(item_id, values=current_values)
-        return 'break'
-
-    def _get_checkbox_columns(self):
-        """Returns set of column indices that are checkbox columns."""
-        if not self.rows:
-            return set()
-        # A column is checkbox if all non-empty cells in it are checkbox values
-        checkbox_cols = set()
-        for col_idx in range(len(self.header)):
-            cells = [row[col_idx] for row in self.rows if col_idx < len(row) and row[col_idx].strip()]
-            if cells and all(self._is_checkbox_value(c) for c in cells):
-                checkbox_cols.add(col_idx)
-        return checkbox_cols
-
-    def _make_blank_row(self):
-        """Creates a blank row with checkboxes pre-filled for checkbox columns."""
-        checkbox_cols = self._get_checkbox_columns()
-        return ["☐" if i in checkbox_cols else "" for i in range(len(self.header))]
-
-    def _ensure_blank_row(self):
-        """Ensures there's always one blank row at the bottom (ignoring checkbox values)."""
-        if not self.rows:
-            self.rows.append(self._make_blank_row())
-            return
-        last_row = self.rows[-1]
-        has_content = any(
-            cell.strip() for cell in last_row
-            if not self._is_checkbox_value(cell)
-        )
-        if has_content:
-            self.rows.append(self._make_blank_row())
-
-    def _add_row(self):
-        new_row = [""] * len(self.header)
-        # Add to data and refresh display
-        current_content = self.get_content()
-        updated_content = current_content + "\n" + ",".join(new_row)
-        self._load_data_and_ui(updated_content)
-        
-
-
-    def _add_column(self):
-        new_header_name = simpledialog.askstring("New Column", "Enter new column header name:", parent=self)
-        if new_header_name:
-            base_name = new_header_name.split('.')[0].strip()
-            if self.name_regex and not self.name_regex.match(base_name):
-                messagebox.showerror("Error", "Header name must only contain letters, numbers, spaces, and hyphens.")
-                return
-            
-            current_header = self.header + [new_header_name]
-            all_rows_data = []
-            for item_id in self.tree.get_children():
-                row_values = list(self.tree.item(item_id, 'values')) + [""]
-                all_rows_data.append(row_values)
-                
-            full_data = [current_header] + all_rows_data
-            updated_content = self._list_to_csv(full_data)
-            
-            # When adding a column, we immediately update the VFS *content* but not the disk.
-            if self.controller and self.controller.active_file_path:
-                if self.controller._set_file_content(self.controller.active_file_path, updated_content):
-                    self._load_data_and_ui(updated_content)
+    def _sync_from_sheet(self):
+        """Pull current sheet data back into self.rows and self.header."""
+        self.header = list(self.sheet.headers())
+        sheet_data = self.sheet.get_sheet_data()
+        self.rows = []
+        for row_data in sheet_data:
+            row = []
+            for col_idx, cell in enumerate(row_data):
+                if col_idx in self._checkbox_cols:
+                    row.append("TRUE" if str(cell).strip() == "☑" else "FALSE")
                 else:
-                    messagebox.showerror("Internal Error", "Failed to commit updated CSV structure to VFS.")
-            else:
-                 messagebox.showerror("Internal Error", "Cannot add column: Controller reference or active path is missing.")
+                    s = str(cell) if cell is not None else ""
+                    # Preserve raw link data if display matches
+                    if s.startswith("⇗ ") and col_idx < len(self.rows):
+                        # Keep existing raw - this path is hit during sync
+                        row.append(s)
+                    else:
+                        row.append(s)
+            self.rows.append(row)
+
+    def _rebuild_sheet(self):
+        """Rebuild the sheet display from internal data."""
+        self.sheet.reset()
+        display = self._get_display_data()
+        self.sheet.set_sheet_data(display)
+        self.sheet.headers(self.header)
+        # Re-apply checkbox column center alignment and readonly
+        for col_idx in self._checkbox_cols:
+            self.sheet.align_columns(col_idx, "center")
+            self.sheet.readonly_columns(col_idx)
+        self.sheet.refresh()
 
     def _list_to_csv(self, data_list):
         csv_output = []
@@ -8713,65 +9501,31 @@ class CSVGrid(ttk.Frame):
             csv_output.append(",".join(quoted_row))
         return "\n".join(csv_output)
 
-
     def get_content(self):
-        if not hasattr(self, 'tree') or not self.tree.winfo_exists():
-             return ""
-
-        # Flush any active cell editor before reading
-        if self.cell_editor and self.cell_editor.winfo_exists():
-            self._edit_ready = True
-            val = self.cell_editor.get()
-            if self._selected_cell:
-                item_id, col_index = self._selected_cell
-                current_values = list(self.tree.item(item_id, 'values'))
-                if col_index < len(current_values):
-                    current_values[col_index] = val
-                    self.tree.item(item_id, values=current_values)
-                    row_index = self.tree.index(item_id)
-                    while len(self.rows) <= row_index:
-                        self.rows.append([""] * len(self.header))
-                    while len(self.rows[row_index]) <= col_index:
-                        self.rows[row_index].append("")
-                    raw = self.rows[row_index][col_index]
-                    if LINK_REGEX.match(str(raw).strip()) and not val.startswith("⇗ "):
-                        self.rows[row_index][col_index] = val
-                    elif not LINK_REGEX.match(str(raw).strip()):
-                        self.rows[row_index][col_index] = val
-
-        all_rows_data = []
-        for row_idx, item_id in enumerate(self.tree.get_children()):
-            row = []
-            for col_idx, v in enumerate(self.tree.item(item_id, 'values')):
-                s = str(v)
-                if s == "☑":
-                    row.append("TRUE")
-                elif s == "☐":
-                    row.append("FALSE")
-                elif s.startswith("⇗ ") and row_idx < len(self.rows) and col_idx < len(self.rows[row_idx]):
-                    # Use raw link data from self.rows, but update display if changed
+        """Return CSV string of current table data."""
+        # Sync checkbox state from sheet
+        sheet_data = self.sheet.get_sheet_data()
+        for row_idx, row_data in enumerate(sheet_data):
+            if row_idx >= len(self.rows):
+                break
+            for col_idx, cell in enumerate(row_data):
+                if col_idx in self._checkbox_cols:
+                    self.rows[row_idx][col_idx] = "TRUE" if str(cell).strip() == "☑" else "FALSE"
+                elif col_idx < len(self.rows[row_idx]):
                     raw = self.rows[row_idx][col_idx]
-                    m = LINK_REGEX.match(str(raw).strip())
-                    if m:
-                        path = m.group(1)
-                        new_display = s[2:]  # strip "⇗ " prefix
-                        row.append(f"[[{path}|{new_display}]]")
-                    else:
-                        row.append(raw)
-                else:
-                    row.append(s)
-            all_rows_data.append(row)
+                    # Don't overwrite link raw data with display
+                    if LINK_REGEX.match(str(raw).strip()):
+                        continue
+                    s = str(cell) if cell is not None else ""
+                    self.rows[row_idx][col_idx] = s
 
-        # Remove all blank rows (ignoring checkbox values)
-        all_rows_data = [
-            row for row in all_rows_data
+        # Strip trailing blank rows for output
+        output_rows = [
+            row for row in self.rows
             if any(cell.strip() for cell in row if not self._is_checkbox_value(cell))
         ]
-
-        full_data = [self.header] + all_rows_data
-        
+        full_data = [self.header] + output_rows
         return self._list_to_csv(full_data)
-
 
 class GraphEditor(ttk.Frame):
     """A node-and-edge graph editor for relationship maps and flowcharts."""
@@ -8804,7 +9558,7 @@ class GraphEditor(ttk.Frame):
         ttk.Button(toolbar, text="Align H", command=self._align_horizontal).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Align V", command=self._align_vertical).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Zoom Fit", command=self._zoom_fit).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Manage Groups", command=self._manage_groups).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Groups & States", command=self._manage_groups).pack(side=tk.LEFT, padx=2)
 
         # Legend
         # Help tooltip button
@@ -8829,7 +9583,10 @@ class GraphEditor(ttk.Frame):
             "  Ctrl+C — Copy nodes\n"
             "  Ctrl+V — Paste nodes\n"
             "  Delete — Delete selected\n"
-            "  Escape — Cancel connection"
+            "  Escape — Cancel connection\n\n"
+            "Multi-select (right-click):\n"
+            "  Set Group — Assign group to all selected\n"
+            "  Set State — Assign state to all selected"
         )
         _help_tip = [None]
         def _show_help(e):
@@ -8893,10 +9650,15 @@ class GraphEditor(ttk.Frame):
                 self._data["nodes"] = data.get("nodes", [])
                 self._data["edges"] = data.get("edges", [])
                 self._data["view"] = data.get("view", {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0})
+                self._data["groups"] = data.get("groups", [])
+                self._data["states"] = data.get("states", [])
         except (json.JSONDecodeError, ValueError):
             pass
 
     def get_content(self):
+        # Persist groups and states (only in-use ones)
+        self._data["groups"] = self._get_groups()
+        self._data["states"] = self._get_states()
         return json.dumps(self._data, indent=2)
 
     def _push_undo(self):
@@ -8933,11 +9695,20 @@ class GraphEditor(ttk.Frame):
         self._redraw()
 
     def _get_groups(self):
-        """Load groups from global config."""
-        if self.controller:
-            config = self.controller._load_config()
-            return config.get("graph_groups", [])
-        return []
+        """Get groups from graph data, derived from nodes in use."""
+        groups = self._data.get("groups", [])
+        # Collect in-use group names
+        used = {n.get("group", "") for n in self._data["nodes"]} - {""}
+        # Keep only groups that are in use, preserving colors
+        return [g for g in groups if g["name"] in used]
+
+    def _get_states(self):
+        """Get states from graph data, derived from nodes in use."""
+        states = self._data.get("states", [])
+        # Collect in-use state names
+        used = {n.get("state", "") for n in self._data["nodes"]} - {""}
+        # Keep only states that are in use, preserving colors
+        return [s for s in states if s["name"] in used]
 
     def _node_by_id(self, node_id):
         for n in self._data["nodes"]:
@@ -9061,9 +9832,12 @@ class GraphEditor(ttk.Frame):
             if shape == "image" and node.get("image"):
                 photo = self._get_node_image(node, zoom)
                 if photo:
+                    hr = node.get("image_size", 48) * zoom / 2 + 3
+                    # Always draw node color border
+                    self.canvas.create_rectangle(cx - hr, cy - hr, cx + hr, cy + hr,
+                                                outline=color, width=2, tags=("node", node["id"]))
                     if node["id"] in self._selected_nodes:
-                        hr = node.get("image_size", 48) * zoom / 2 + 3
-                        self.canvas.create_rectangle(cx - hr, cy - hr, cx + hr, cy + hr,
+                        self.canvas.create_rectangle(cx - hr - 2, cy - hr - 2, cx + hr + 2, cy + hr + 2,
                                                     outline="#FFD700", width=3, tags=("node", node["id"]))
                     self.canvas.create_image(cx, cy, image=photo, anchor="center",
                                            tags=("node", node["id"]))
@@ -9104,6 +9878,21 @@ class GraphEditor(ttk.Frame):
                     gx, gy = lx, ly + 12 * zoom
                 self.canvas.create_text(gx, gy, text=group, fill="#aaaaaa", anchor=anchor,
                                        font=('Helvetica', max(7, int(8 * zoom))), tags=("group_label",))
+
+            # State indicator (small colored dot top-right)
+            state = node.get("state", "")
+            if state:
+                state_color = "#888888"
+                for s in self._get_states():
+                    if s["name"] == state:
+                        state_color = s.get("color", "#888888")
+                        break
+                sr = max(4, 6 * zoom)
+                sx = cx + r * 0.7
+                sy = cy - r * 0.7
+                self.canvas.create_oval(sx - sr, sy - sr, sx + sr, sy + sr,
+                                       fill=state_color, outline="#ffffff", width=1,
+                                       tags=("state_indicator",))
 
         # Draw connection line in progress
         if self._connecting_from and hasattr(self, '_connect_mouse_pos'):
@@ -9515,6 +10304,26 @@ class GraphEditor(ttk.Frame):
             else:
                 menu.add_command(label="Edit Node", command=lambda: self._edit_node(node))
                 menu.add_separator()
+                # Multi-select group/state assignment
+                if self._selected_nodes:
+                    group_menu = tk.Menu(menu, tearoff=0)
+                    group_menu.add_command(label="(none)", command=lambda: self._set_selected_group(""))
+                    for g in self._get_groups():
+                        group_menu.add_command(label=g["name"],
+                                             command=lambda n=g["name"], c=g["color"]: self._set_selected_group(n, c))
+                    group_menu.add_separator()
+                    group_menu.add_command(label="New Group...", command=self._set_selected_group_new)
+                    menu.add_cascade(label="Set Group", menu=group_menu)
+
+                    state_menu = tk.Menu(menu, tearoff=0)
+                    state_menu.add_command(label="(none)", command=lambda: self._set_selected_state(""))
+                    for s in self._get_states():
+                        state_menu.add_command(label=s["name"],
+                                             command=lambda n=s["name"]: self._set_selected_state(n))
+                    state_menu.add_separator()
+                    state_menu.add_command(label="New State...", command=self._set_selected_state_new)
+                    menu.add_cascade(label="Set State", menu=state_menu)
+                    menu.add_separator()
                 menu.add_command(label="Delete Node", command=lambda: self._delete_node(node["id"]))
         elif edge:
             menu.add_command(label="Edit Connection", command=lambda: self._edit_edge(edge))
@@ -9532,19 +10341,26 @@ class GraphEditor(ttk.Frame):
     def _add_node_at(self, wx, wy):
         node = {"id": str(uuid.uuid4()), "label": "New Node", "x": wx, "y": wy,
                 "color": "#4CAF50", "group": "", "link": ""}
-        dialog = GraphNodeDialog(self, node, self._get_groups(), self.controller)
+        dialog = GraphNodeDialog(self, node, self._get_groups(), self._get_states(), self.controller)
         if dialog.result:
             self._push_undo()
             self._data["nodes"].append(dialog.result)
+            self._sync_groups_states(dialog)
             self._redraw()
 
     def _edit_node(self, node):
-        dialog = GraphNodeDialog(self, node, self._get_groups(), self.controller)
+        dialog = GraphNodeDialog(self, node, self._get_groups(), self._get_states(), self.controller)
         if dialog.result:
             self._push_undo()
             idx = next(i for i, n in enumerate(self._data["nodes"]) if n["id"] == node["id"])
             self._data["nodes"][idx] = dialog.result
+            self._sync_groups_states(dialog)
             self._redraw()
+
+    def _sync_groups_states(self, dialog):
+        """Sync new groups/states from dialog back into graph data."""
+        self._data["groups"] = dialog._groups
+        self._data["states"] = dialog._states
 
     def _delete_node(self, node_id):
         node = self._node_by_id(node_id)
@@ -9705,28 +10521,71 @@ class GraphEditor(ttk.Frame):
 
     # --- Groups ---
 
-    def _manage_groups(self):
-        """Open dialog to delete individual unused groups."""
-        if not self.controller:
-            return
-        # Save current editor content to VFS so scan picks up latest state
-        self.controller._save_editor_content_to_vfs()
-        groups = self._get_groups()
-        if not groups:
-            messagebox.showinfo("Manage Groups", "No groups defined.")
-            return
+    def _set_selected_group(self, group_name, color=None):
+        """Set group on all selected nodes."""
+        self._push_undo()
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes and node.get("type") != "junction":
+                node["group"] = group_name
+                if color:
+                    node["color"] = color
+        self._redraw()
 
-        # Find which groups are in use
-        used = set()
-        self._scan_node_groups(self.controller.vfs.get(self.controller.root_name, {}), used)
+    def _set_selected_group_new(self):
+        """Create a new group and apply to selected nodes."""
+        name = simpledialog.askstring("New Group", "Group name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(title=f"Color for '{name}'", parent=self)
+        c = color[1] if color[1] else "#4CAF50"
+        # Add to graph data
+        if "groups" not in self._data:
+            self._data["groups"] = []
+        if not any(g["name"] == name for g in self._data["groups"]):
+            self._data["groups"].append({"name": name, "color": c})
+        self._set_selected_group(name, c)
+
+    def _set_selected_state(self, state_name):
+        """Set state on all selected nodes."""
+        self._push_undo()
+        for node in self._data["nodes"]:
+            if node["id"] in self._selected_nodes and node.get("type") != "junction":
+                node["state"] = state_name
+        self._redraw()
+
+    def _set_selected_state_new(self):
+        """Create a new state and apply to selected nodes."""
+        name = simpledialog.askstring("New State", "State name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        from tkinter import colorchooser
+        color = colorchooser.askcolor(title=f"Color for state '{name}'", parent=self)
+        c = color[1] if color[1] else "#888888"
+        # Add to graph data
+        if "states" not in self._data:
+            self._data["states"] = []
+        if not any(s["name"] == name for s in self._data["states"]):
+            self._data["states"].append({"name": name, "color": c})
+        self._set_selected_state(name)
+
+    def _manage_groups(self):
+        """Show current groups. Groups auto-clean when no nodes use them."""
+        groups = self._get_groups()
+        states = self._get_states()
+        if not groups and not states:
+            messagebox.showinfo("Groups & States", "No groups or states in use.")
+            return
 
         dialog = tk.Toplevel(self)
         dialog.transient(self)
         dialog.grab_set()
-        dialog.title("Manage Groups")
+        dialog.title("Groups & States")
         dialog.geometry("300x300")
 
-        ttk.Label(dialog, text="Select a group to delete.\nGroups in use are protected.",
+        ttk.Label(dialog, text="In-use groups and states.\nRemove from all nodes to delete.",
                  font=('Helvetica', 9)).pack(padx=10, pady=5)
 
         frame = ttk.Frame(dialog)
@@ -9739,34 +10598,14 @@ class GraphEditor(ttk.Frame):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         for g in groups:
-            suffix = " (in use)" if g["name"] in used else ""
-            listbox.insert(tk.END, f"{g['name']}{suffix}")
+            listbox.insert(tk.END, f"[Group] {g['name']}")
             listbox.itemconfig(tk.END, fg=g.get("color", "#ffffff"))
-
-        def delete_selected():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            idx = sel[0]
-            g = groups[idx]
-            if g["name"] in used:
-                messagebox.showwarning("Cannot Delete", f"'{g['name']}' is in use by active nodes.", parent=dialog)
-                return
-            if not messagebox.askyesno("Delete Group", f"Delete group '{g['name']}'?", parent=dialog):
-                return
-            groups.pop(idx)
-            config = self.controller._load_config()
-            config["graph_groups"] = groups
-            try:
-                with open(self.controller.CONFIG_FILE, 'w') as f:
-                    json.dump(config, f, indent=2)
-            except Exception:
-                pass
-            listbox.delete(idx)
+        for s in states:
+            listbox.insert(tk.END, f"[State] {s['name']}")
+            listbox.itemconfig(tk.END, fg=s.get("color", "#888888"))
 
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        ttk.Button(btn_frame, text="Delete", command=delete_selected).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Done", command=dialog.destroy).pack(side=tk.RIGHT, padx=2)
 
         dialog.bind('<Escape>', lambda e: dialog.destroy())
@@ -9794,7 +10633,7 @@ class GraphEditor(ttk.Frame):
 
 class GraphNodeDialog(tk.Toplevel):
     """Dialog for editing a graph node."""
-    def __init__(self, parent, node, groups, controller=None):
+    def __init__(self, parent, node, groups, states, controller=None):
         super().__init__(parent)
         self.transient(parent)
         self.grab_set()
@@ -9802,11 +10641,13 @@ class GraphNodeDialog(tk.Toplevel):
         self.result = None
         self.controller = controller
         self._groups = groups
-        self.geometry("380x400")
+        self._states = states
+        self.geometry("380x440")
 
         self._id = node.get("id", str(uuid.uuid4()))
         self._x = node.get("x", 0)
         self._y = node.get("y", 0)
+        self._states = self._get_states()
 
         ttk.Label(self, text="Label:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
         self.label_var = tk.StringVar(value=node.get("label", ""))
@@ -9867,8 +10708,14 @@ class GraphNodeDialog(tk.Toplevel):
         ttk.Entry(link_frame, textvariable=self.link_var, width=18).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(link_frame, text="Pick", command=self._pick_link).pack(side=tk.LEFT, padx=(5, 0))
 
+        ttk.Label(self, text="State:").grid(row=9, column=0, sticky="w", padx=10, pady=5)
+        state_names = [""] + [s["name"] for s in self._states]
+        self.state_var = tk.StringVar(value=node.get("state", ""))
+        state_combo = ttk.Combobox(self, textvariable=self.state_var, values=state_names, width=25)
+        state_combo.grid(row=9, column=1, sticky="ew", padx=10, pady=5)
+
         btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=9, column=0, columnspan=2, pady=10)
+        btn_frame.grid(row=10, column=0, columnspan=2, pady=10)
         ttk.Button(btn_frame, text="OK", command=self._ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=5)
 
@@ -9876,6 +10723,10 @@ class GraphNodeDialog(tk.Toplevel):
         self.bind('<Return>', lambda e: self._ok())
         self.bind('<Escape>', lambda e: self._cancel())
         self.wait_window(self)
+
+    def _get_states(self):
+        """Return states list."""
+        return self._states
 
     def _on_group_change(self, *args):
         """Auto-set node color to match group color, or create new group."""
@@ -9941,15 +10792,13 @@ class GraphNodeDialog(tk.Toplevel):
         # Auto-create group if it's new
         if group_name and not any(g["name"] == group_name for g in self._groups):
             self._groups.append({"name": group_name, "color": color})
-            # Save to global config
-            if self.controller:
-                config = self.controller._load_config()
-                config["graph_groups"] = self._groups
-                try:
-                    with open(self.controller.CONFIG_FILE, 'w') as f:
-                        json.dump(config, f, indent=2)
-                except Exception:
-                    pass
+        state_name = self.state_var.get().strip()
+        # Auto-create state if it's new
+        if state_name and not any(s["name"] == state_name for s in self._states):
+            from tkinter import colorchooser
+            state_color = colorchooser.askcolor(title=f"Color for state '{state_name}'", parent=self)
+            sc = state_color[1] if state_color[1] else "#888888"
+            self._states.append({"name": state_name, "color": sc})
         self.result = {
             "id": self._id, "label": label,
             "description": self.desc_text.get("1.0", tk.END).strip(),
@@ -9960,6 +10809,7 @@ class GraphNodeDialog(tk.Toplevel):
             "label_pos": self.label_pos_var.get(),
             "color": color,
             "group": group_name,
+            "state": state_name,
             "link": self.link_var.get().strip()
         }
         self.destroy()
